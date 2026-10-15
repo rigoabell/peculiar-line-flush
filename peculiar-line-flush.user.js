@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.12
+// @version      2.9.13
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.12";
+  const VERSION = "2.9.13";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1546,7 +1546,7 @@
         }
         .modal::after {
           content: "";
-          position: absolute; inset: 0; z-index: 30;
+          position: absolute; inset: 0; z-index: 0;
           border-radius: inherit; pointer-events: none;
           background: var(--plf-glow); opacity: 0;
         }
@@ -1637,6 +1637,8 @@
         .missing { background: #fdeceb; border: 1px solid #e7b0aa; color: #111111; }
         .error { background: #fff4e5; border: 1px solid #e6c48a; color: #111111; }
         .split {
+          position: relative; z-index: 1;
+          flex: 1 1 auto;
           min-height: 0;
           display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .9fr);
         }
@@ -1649,10 +1651,13 @@
         .history th:nth-child(1), .history td:nth-child(1) { width: 52px; }
         .history th:nth-child(3), .history td:nth-child(3) { width: 72px; }
         .history th:nth-child(4), .history td:nth-child(4) { width: 44px; }
+        .bar, .scanrow, .status, .ageboard, .identity, .foot { position: relative; z-index: 1; flex: 0 0 auto; }
         .identity {
-          margin-bottom: 6px; font-size: 13px; font-weight: 700; line-height: 1.35;
-          word-break: break-word;
-          display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+          margin: 8px 10px 0; padding: 8px 10px;
+          font-size: 16px; font-weight: 800; line-height: 1.35;
+          overflow-wrap: anywhere;
+          background: #ffffff; color: #111111;
+          border: 2px solid #111111; border-radius: 8px;
         }
         .lineswrap, .histwrap { min-height: 0; overflow: auto; max-height: min(240px, calc(100vh - 230px)); }
         .histhead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
@@ -1664,8 +1669,9 @@
         }
         .empty { color: #667085; font-weight: 500; }
         table { width: 100%; border-collapse: collapse; font-size: 12px; color: #111111; }
-        th { text-align: left; color: #111111; font-weight: 650; padding: 2px 6px; border-bottom: 1px solid #e4e7ec; position: sticky; top: 0; background: #ffffff; }
+        th { text-align: left; color: #111111; font-weight: 650; padding: 2px 6px; border-bottom: 1px solid #e4e7ec; position: sticky; top: 0; background: #ffffff; z-index: 1; }
         td { padding: 3px 6px; border-bottom: 1px solid #eef1f5; font-variant-numeric: tabular-nums; }
+        #lines tr.aged td { background: var(--row); color: var(--ink); }
         .histwrap tr { cursor: pointer; }
         .histwrap tr:hover { background: #f3f5f8; }
         .histwrap tr.active { background: #e7edf5; }
@@ -1843,9 +1849,9 @@
             <div class="age-val" id="ageVal">Scan</div>
                 <div class="age-tag" id="ageTag">—</div>
               </div>
+          <div class="identity" id="identity"><span class="empty">No container yet</span></div>
           <div class="split">
           <div class="ticket">
-              <div class="identity" id="identity"><span class="empty">No container yet</span></div>
               <div class="lineswrap">
             <table>
               <thead><tr><th>Age</th><th>FcSku</th><th>Qty</th><th>Owner</th><th>Disposition</th></tr></thead>
@@ -2248,10 +2254,15 @@
       const lines = result?.inventory || [];
       shadow.getElementById("lines").innerHTML = lines.length
         ? lines
-            .map(
-              (r) =>
-                `<tr><td>${dash(r.age)}</td><td>${dash(r.fcSku)}</td><td>${dash(r.quantity)}</td><td>${dash(r.owner)}</td><td>${dash(r.disposition)}</td></tr>`
-            )
+            .map((r) => {
+              const sku = cellText(r.fcSku);
+              let paint = "";
+              if (sku) {
+                const tone = /^unowned$/i.test(cellText(r.owner)) ? ageTone(99) : ageTone(parseAgeDays(r.age));
+                if (tone.bg !== "#ffffff") paint = ` class="aged" style="--row:${tone.bg};--ink:${tone.fg}"`;
+              }
+              return `<tr${paint}><td>${dash(r.age)}</td><td>${dash(r.fcSku)}</td><td>${dash(r.quantity)}</td><td>${dash(r.owner)}</td><td>${dash(r.disposition)}</td></tr>`;
+            })
             .join("")
         : `<tr><td colspan="5" class="empty">No inventory lines</td></tr>`;
     }
