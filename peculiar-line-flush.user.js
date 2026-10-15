@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.9
+// @version      2.9.10
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.9";
+  const VERSION = "2.9.10";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1680,22 +1680,47 @@
           font-size: 12px; color: #111111;
         }
         .foot b { color: #111111; }
-        #footMsg { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .note {
-          flex: 0 1 46%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-          font-size: 12px; font-weight: 700; border-radius: 6px; padding: 3px 8px;
+        #footMsg { flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+        .toast {
+          display: none;
+          position: fixed; z-index: 35;
+          top: 12px; left: 50%; transform: translateX(-50%);
+          width: max-content; min-width: min(280px, calc(100vw - 24px));
+          max-width: calc(100vw - 24px); max-height: calc(100vh - 24px);
+          overflow: auto; pointer-events: auto;
+          background: #ffffff; color: #111111;
+          border: 3px solid #111111; border-radius: 12px;
+          box-shadow: 0 16px 40px rgba(0,0,0,.28);
+          padding: 14px;
         }
-        .locprompt {
-          display: none; position: absolute; inset: 0; z-index: 40;
-          align-items: center; justify-content: center; padding: 16px;
-          background: rgba(255,255,255,.82);
+        .toast.open { display: block; }
+        .toast.found { background: #e8f6ec; border-color: #0b6b2f; }
+        .toast.missing, .toast.error { background: #fff4f4; border-color: #b42318; }
+        .toast-msg { font-size: 18px; font-weight: 800; line-height: 1.35; overflow-wrap: anywhere; }
+        #toastClose {
+          display: block; margin-top: 10px; height: 42px; width: 100%;
+          font-size: 16px; font-weight: 800; cursor: pointer;
+          background: #111111; color: #ffffff; border: 2px solid #111111; border-radius: 8px;
         }
-        .locprompt.open { display: flex; }
+        .locprompt, .dbg, .sharebox, .excelock, .accessdeny {
+          display: none;
+          position: fixed;
+          left: 50%; top: 50%; transform: translate(-50%, -50%);
+          max-width: calc(100vw - 24px); max-height: calc(100vh - 24px);
+          height: auto; overflow: auto; pointer-events: auto;
+        }
+        .locprompt.open, .dbg.open, .sharebox.open, .excelock.open, .accessdeny.open { display: block; }
+        .locprompt, .sharebox, .excelock { z-index: 40; width: min(480px, calc(100vw - 24px)); }
+        .sharebox { z-index: 41; }
+        .dbg { z-index: 50; width: min(640px, calc(100vw - 24px)); }
+        .excelock { z-index: 60; }
+        .accessdeny { z-index: 70; width: min(720px, calc(100vw - 24px)); }
         .locprompt-card {
-          width: min(340px, 100%); max-height: 100%;
+          width: min(420px, calc(100vw - 24px));
           display: flex; flex-direction: column; gap: 8px;
-          padding: 12px; background: #ffffff; color: #111111;
-          border: 1px solid #111111; border-radius: 12px;
+          padding: 14px; background: #ffffff; color: #111111;
+          border: 3px solid #111111; border-radius: 12px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
         .locprompt-title { font-size: 16px; font-weight: 800; }
         .locprompt-for { font-size: 13px; font-weight: 700; word-break: break-word; }
@@ -1703,37 +1728,27 @@
         .locprompt-list button, .locprompt-actions button { text-align: left; }
         .locprompt-actions { display: flex; gap: 8px; }
         .locprompt-actions button { flex: 1; text-align: center; }
-        .dbg {
-          display: none; position: absolute; inset: 0; z-index: 50;
-          align-items: center; justify-content: center; padding: 16px;
-          background: rgba(255,255,255,.9);
-        }
-        .dbg.open { display: flex; }
         .dbg-card {
-          width: min(640px, 100%); max-height: 100%;
+          width: min(640px, calc(100vw - 24px));
           display: flex; flex-direction: column; gap: 8px;
-          padding: 12px; background: #ffffff; color: #111111;
-          border: 1px solid #111111; border-radius: 12px;
+          padding: 14px; background: #ffffff; color: #111111;
+          border: 3px solid #111111; border-radius: 12px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
         .dbg-title { font-size: 16px; font-weight: 800; }
         #dbgText {
-          width: 100%; min-height: 220px; max-height: min(420px, 52vh); resize: vertical;
+          width: 100%; min-height: 160px; max-height: min(360px, calc(100vh - 220px)); resize: vertical;
           border: 1px solid #111111; border-radius: 8px; padding: 8px;
           background: #ffffff; color: #111111;
           font: 12px/1.4 Consolas, "Courier New", monospace;
         }
         .dbg-actions { display: flex; gap: 8px; justify-content: flex-end; }
-        .sharebox {
-          display: none; position: absolute; inset: 0; z-index: 40;
-          align-items: center; justify-content: center; padding: 16px;
-          background: rgba(255,255,255,.94);
-        }
-        .sharebox.open { display: flex; }
         .sharebox-card {
-          width: min(460px, 100%);
+          width: min(480px, calc(100vw - 24px));
           display: flex; flex-direction: column; gap: 10px;
           padding: 16px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
         .sharebox-title { font-size: 22px; font-weight: 900; }
         .sharebox-lead { margin: 0; font-size: 16px; font-weight: 700; line-height: 1.35; }
@@ -1749,17 +1764,12 @@
           background: #111111; color: #ffffff; border: 2px solid #111111;
         }
         #shareClose { height: 40px; font-weight: 800; }
-        .excelock {
-          display: none; position: absolute; inset: 0; z-index: 60;
-          align-items: center; justify-content: center; padding: 16px;
-          background: rgba(255,255,255,.94);
-        }
-        .excelock.open { display: flex; }
         .excelock-card {
-          width: min(440px, 100%);
+          width: min(480px, calc(100vw - 24px));
           display: flex; flex-direction: column; gap: 10px;
           padding: 16px; background: #ffffff; color: #111111;
-          border: 1px solid #111111; border-radius: 12px;
+          border: 3px solid #111111; border-radius: 12px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
         .excelock-title { font-size: 18px; font-weight: 800; }
         .excelock-file {
@@ -1773,19 +1783,12 @@
           background: #111111; color: #ffffff; border: 1px solid #111111;
         }
         #excelockRetry:disabled { opacity: .55; cursor: default; }
-        .accessdeny {
-          display: none; position: absolute; inset: 0; z-index: 70;
-          align-items: center; justify-content: center; padding: 12px;
-          background: #7f1d1d;
-        }
-        .accessdeny.open { display: flex; }
         .accessdeny-card {
-          width: min(760px, 100%);
-          max-height: 100%;
-          overflow: auto;
+          width: min(720px, calc(100vw - 24px));
           display: flex; flex-direction: column; gap: 12px;
           padding: 18px; background: #ffffff; color: #111111;
           border: 6px solid #111111; border-radius: 16px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
         .accessdeny-stop {
           font-size: 56px; font-weight: 900; letter-spacing: .08em; line-height: 1;
@@ -1873,63 +1876,66 @@
               </div>
             </div>
           </div>
-          <div class="dbg" id="dbg">
-            <div class="dbg-card">
-              <div class="dbg-title">Debug</div>
-              <textarea id="dbgText" spellcheck="false"></textarea>
-              <div class="dbg-actions">
-                <button id="dbgCopy" type="button">Copy</button>
-                <button id="dbgClose" type="button">Close</button>
-              </div>
-            </div>
-          </div>
-          <div class="sharebox" id="sharebox">
-            <div class="sharebox-card">
-              <div class="sharebox-title">Share the install link</div>
-              <p class="sharebox-lead">This link installs Peculiar Line Flush in Tampermonkey. The other person opens it in Firefox and clicks Install.</p>
-              <div class="sharebox-url" id="shareUrl"></div>
-              <div id="shareStatus"></div>
-              <button id="shareGo" type="button">SHARE THE INSTALL LINK</button>
-              <button id="shareClose" type="button">Close</button>
-            </div>
-          </div>
-          <div class="excelock" id="excelock">
-            <div class="excelock-card">
-              <div class="excelock-title">Excel file is open</div>
-              <div class="excelock-file" id="excelockFile"></div>
-              <div class="excelock-msg" id="excelockMsg">Close that file in Excel, then press RETRY.</div>
-              <button id="excelockRetry" type="button">RETRY</button>
-            </div>
-          </div>
-          <div class="accessdeny" id="accessdeny">
-            <div class="accessdeny-card">
-              <div class="accessdeny-stop">STOP</div>
-              <div class="accessdeny-title" id="accessTitle">YOUR SCANS WERE NOT SAVED</div>
-              <div class="accessdeny-file" id="accessFile"></div>
-              <ol class="accessdeny-steps">
-                <li>Click the yellow button. It opens the SharePoint folder.</li>
-                <li>Wait until that page finishes loading. Leave it open.</li>
-                <li>Come back to this page and press RETRY.</li>
-              </ol>
-              <div id="accessMsg">This box stays here until the save works. RETRY is the only way to close it.</div>
-              <button id="accessOpen" type="button">OPEN THE FOLDER</button>
-              <button id="accessRetry" type="button">RETRY</button>
-            </div>
-          </div>
-          <div class="locprompt" id="locprompt">
-            <div class="locprompt-card">
-              <div class="locprompt-title">Select a location</div>
-              <div class="locprompt-for" id="locpromptFor"></div>
-              <div class="locprompt-list" id="locpromptList"></div>
-              <div class="locprompt-actions">
-                <button id="locpromptOther" type="button">Other…</button>
-                <button id="locpromptCancel" type="button">Cancel</button>
-              </div>
-            </div>
-          </div>
           <div class="foot">
             <span id="footMsg">File saves on the first scan. Keep it closed in Excel.</span>
-            <span class="note ready" id="note">Ready</span>
+          </div>
+        </div>
+      </div>
+      <div class="toast" id="toast">
+        <div class="toast-msg" id="note"></div>
+        <button id="toastClose" type="button">Close</button>
+      </div>
+      <div class="dbg" id="dbg">
+        <div class="dbg-card">
+          <div class="dbg-title">Debug</div>
+          <textarea id="dbgText" spellcheck="false"></textarea>
+          <div class="dbg-actions">
+            <button id="dbgCopy" type="button">Copy</button>
+            <button id="dbgClose" type="button">Close</button>
+          </div>
+        </div>
+      </div>
+      <div class="sharebox" id="sharebox">
+        <div class="sharebox-card">
+          <div class="sharebox-title">Share the install link</div>
+          <p class="sharebox-lead">This link installs Peculiar Line Flush in Tampermonkey. The other person opens it in Firefox and clicks Install.</p>
+          <div class="sharebox-url" id="shareUrl"></div>
+          <div id="shareStatus"></div>
+          <button id="shareGo" type="button">SHARE THE INSTALL LINK</button>
+          <button id="shareClose" type="button">Close</button>
+        </div>
+      </div>
+      <div class="excelock" id="excelock">
+        <div class="excelock-card">
+          <div class="excelock-title">Excel file is open</div>
+          <div class="excelock-file" id="excelockFile"></div>
+          <div class="excelock-msg" id="excelockMsg">Close that file in Excel, then press RETRY.</div>
+          <button id="excelockRetry" type="button">RETRY</button>
+        </div>
+      </div>
+      <div class="accessdeny" id="accessdeny">
+        <div class="accessdeny-card">
+          <div class="accessdeny-stop">STOP</div>
+          <div class="accessdeny-title" id="accessTitle">YOUR SCANS WERE NOT SAVED</div>
+          <div class="accessdeny-file" id="accessFile"></div>
+          <ol class="accessdeny-steps">
+            <li>Click the yellow button. It opens the SharePoint folder.</li>
+            <li>Wait until that page finishes loading. Leave it open.</li>
+            <li>Come back to this page and press RETRY.</li>
+          </ol>
+          <div id="accessMsg">This box stays here until the save works. RETRY is the only way to close it.</div>
+          <button id="accessOpen" type="button">OPEN THE FOLDER</button>
+          <button id="accessRetry" type="button">RETRY</button>
+        </div>
+      </div>
+      <div class="locprompt" id="locprompt">
+        <div class="locprompt-card">
+          <div class="locprompt-title">Select a location</div>
+          <div class="locprompt-for" id="locpromptFor"></div>
+          <div class="locprompt-list" id="locpromptList"></div>
+          <div class="locprompt-actions">
+            <button id="locpromptOther" type="button">Other…</button>
+            <button id="locpromptCancel" type="button">Cancel</button>
           </div>
         </div>
       </div>
@@ -1971,12 +1977,16 @@
     let excelLockRetrying = false;
     let accessDeniedOpen = false;
     let open = true;
+    let toastedNotice = "";
+    let toastedError = "";
     let alias = "";
     let spOk = false;
     let selectedId = "";
 
     function setBanner(kind, html) {
-      note.className = "note " + kind;
+      const toast = shadow.getElementById("toast");
+      toast.className = "toast open " + (kind || "info");
+      note.className = "toast-msg";
       note.innerHTML = html;
     }
 
@@ -2255,11 +2265,17 @@
       const ses = GM_getValue(KEYS.session, null);
       const today = ses?.day === dayStamp() && ses?.name;
       if (updateNotice && updateNoticeUntil && Date.now() > updateNoticeUntil) updateNotice = "";
-      if (updateNotice) {
-        shadow.getElementById("footMsg").textContent = updateNotice;
-      } else if (lastError) {
-        shadow.getElementById("footMsg").innerHTML = `<span style="color:#9b1c1c">Save error: ${escapeHtml(clip(lastError, 160))}</span>`;
-      } else if (today && fileOk) {
+      if (updateNotice && updateNotice !== toastedNotice) {
+        toastedNotice = updateNotice;
+        setBanner(/failed/i.test(updateNotice) ? "error" : "info", escapeHtml(updateNotice));
+      }
+      if (!updateNotice) toastedNotice = "";
+      if (lastError && lastError !== toastedError) {
+        toastedError = lastError;
+        setBanner("error", `<strong>Save error.</strong> ${escapeHtml(lastError)}`);
+      }
+      if (!lastError) toastedError = "";
+      if (today && fileOk) {
         const where = selectedLocation ? ` · ${escapeHtml(selectedLocation)}` : "";
         shadow.getElementById("footMsg").innerHTML =
           `<b>${escapeHtml(ses.name)}</b> · ${ses.count} rows${where}`;
@@ -2515,6 +2531,10 @@
       });
     });
     shadow.getElementById("shareClose").addEventListener("click", () => closeShare());
+    shadow.getElementById("toastClose").addEventListener("click", () => {
+      shadow.getElementById("toast").classList.remove("open");
+      focusScanBox();
+    });
 
     function closeDebug() {
       debugPanel.classList.remove("open");
@@ -2771,6 +2791,10 @@
           closeDebug();
           return;
         }
+        if (shadow.getElementById("toast").classList.contains("open")) {
+          shadow.getElementById("toast").classList.remove("open");
+          return;
+        }
         setOpen(false);
         return;
       }
@@ -2942,19 +2966,17 @@
       <style>
         :host { all: initial; }
         * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
-        .wrap {
-          position: fixed; inset: 0; z-index: 1;
-          display: flex; align-items: center; justify-content: center;
-          padding: 16px 16px 110px; background: rgba(127,29,29,.92);
-        }
         .card {
-          width: min(760px, 100%);
-          max-height: calc(100vh - 130px);
+          position: fixed; z-index: 1;
+          left: 50%; top: 50%; transform: translate(-50%, -50%);
+          width: min(760px, calc(100vw - 24px));
+          max-height: calc(100vh - 24px);
           overflow: auto;
           background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 14px;
           padding: 18px 18px 16px;
           display: flex; flex-direction: column; gap: 12px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
         .attn { font-size: 64px; font-weight: 900; letter-spacing: .08em; line-height: 1; text-align: center; background: #b42318; color: #ffffff; padding: 12px; }
         .lead { font-size: 28px; font-weight: 900; line-height: 1.2; margin: 0; text-align: center; }
@@ -2965,16 +2987,13 @@
         .steps { margin: 0; padding-left: 34px; }
         .steps li { margin: 10px 0; font-size: 24px; font-weight: 900; line-height: 1.25; }
         .try {
-          position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 2;
           height: 72px; border: 4px solid #111111; border-radius: 12px;
           background: #111111; color: #ffffff;
-          font-size: 24px; font-weight: 900; letter-spacing: .02em;
+          font-size: 22px; font-weight: 900; letter-spacing: .02em;
           cursor: pointer;
-          box-shadow: 0 8px 24px rgba(0,0,0,.35);
         }
       </style>
-      <div class="wrap">
-        <div class="card">
+      <div class="card">
           <div class="attn">STOP</div>
           <p class="lead">Turn the old script OFF before you scan.</p>
           <div class="box old">
@@ -2991,11 +3010,10 @@
             <li>Click the Tampermonkey icon. It is the puzzle piece at the top of Firefox.</li>
             <li>Find the red name above. Click its switch so it turns OFF.</li>
             <li>Leave Peculiar Line Flush ON.</li>
-            <li>Click the black button at the bottom of this screen.</li>
+            <li>Click the black button below.</li>
           </ol>
-        </div>
-      </div>
-      <button class="try" id="tryAgain" type="button">I TURNED THE OLD SCRIPT OFF</button>`;
+          <button class="try" id="tryAgain" type="button">I TURNED THE OLD SCRIPT OFF</button>
+        </div>`;
     shadow.getElementById("tryAgain").addEventListener("click", () => tryLineFlushAgain());
     document.documentElement.append(host);
   }
@@ -3047,17 +3065,17 @@
       <style>
         :host { all: initial; }
         * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
-        .wrap {
-          position: fixed; inset: 0; z-index: 1;
-          display: flex; align-items: center; justify-content: center;
-          padding: 16px; background: rgba(0,0,0,.55);
-        }
         .card {
-          width: min(520px, 100%);
+          position: fixed; z-index: 1;
+          left: 50%; top: 50%; transform: translate(-50%, -50%);
+          width: min(520px, calc(100vw - 24px));
+          max-height: calc(100vh - 24px);
+          overflow: auto;
           background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 14px;
           padding: 18px 18px 16px;
           display: flex; flex-direction: column; gap: 12px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
         .attn { font-size: 28px; font-weight: 900; letter-spacing: .04em; }
         .lead { font-size: 16px; font-weight: 700; margin: 0; }
@@ -3074,8 +3092,7 @@
           font-size: 18px; font-weight: 900; cursor: pointer;
         }
       </style>
-      <div class="wrap">
-        <div class="card">
+      <div class="card">
           <div class="attn">⚠️ NEW VERSION</div>
           <p class="lead">${escapeHtml(SCRIPT_NAME)} found a newer copy on its own.</p>
           <div class="box">
@@ -3092,8 +3109,7 @@
             <li>Come back to this page and refresh it.</li>
           </ol>
           <button class="go" id="installUpdate" type="button">Install the new Peculiar Line Flush</button>
-        </div>
-      </div>`;
+        </div>`;
     shadow.getElementById("installUpdate").addEventListener("click", () => {
       try {
         GM_openInTab(UPDATE_URL, { active: true, insert: true });
@@ -3169,16 +3185,22 @@
       el = document.createElement("div");
       el.id = "plf-boot-error";
       el.style.setProperty("position", "fixed", "important");
-      el.style.setProperty("left", "12px", "important");
-      el.style.setProperty("right", "12px", "important");
+      el.style.setProperty("left", "50%", "important");
       el.style.setProperty("bottom", "12px", "important");
+      el.style.setProperty("transform", "translateX(-50%)", "important");
+      el.style.setProperty("width", "max-content", "important");
+      el.style.setProperty("max-width", "calc(100vw - 24px)", "important");
+      el.style.setProperty("max-height", "calc(100vh - 24px)", "important");
+      el.style.setProperty("overflow", "auto", "important");
       el.style.setProperty("z-index", "2147483647", "important");
       el.style.setProperty("background", "#ffffff", "important");
       el.style.setProperty("color", "#111111", "important");
       el.style.setProperty("border", "3px solid #111111", "important");
-      el.style.setProperty("border-radius", "10px", "important");
-      el.style.setProperty("padding", "12px 14px", "important");
-      el.style.setProperty("font", "700 16px/1.4 Segoe UI, sans-serif", "important");
+      el.style.setProperty("border-radius", "12px", "important");
+      el.style.setProperty("padding", "14px 16px", "important");
+      el.style.setProperty("font", "800 18px/1.35 Segoe UI, sans-serif", "important");
+      el.style.setProperty("overflow-wrap", "anywhere", "important");
+      el.style.setProperty("box-shadow", "0 16px 40px rgba(0,0,0,.28)", "important");
       document.documentElement.append(el);
     }
     el.textContent = message;
