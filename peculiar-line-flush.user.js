@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.15
+// @version      2.9.16
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.15";
+  const VERSION = "2.9.16";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1269,7 +1269,11 @@
 
   function isAccessDenied(status, text) {
     const blob = `${status || ""} ${text || ""}`;
-    return Number(status) === 403 || /access denied|unauthorizedaccessexception|-2147024891/i.test(blob);
+    return (
+      Number(status) === 403 ||
+      Number(status) === 401 ||
+      /access denied|unauthorizedaccessexception|-2147024891|\b401\b/i.test(blob)
+    );
   }
 
   function accessDeniedError(name) {
@@ -1937,7 +1941,8 @@
           <div class="accessdeny-file" id="accessFile"></div>
               <ol class="accessdeny-steps">
                 <li>Click the yellow OPEN THE FOLDER button.</li>
-                <li>A new tab opens. Wait. Do not click around.</li>
+                <li>A new tab opens. Wait.</li>
+                <li>If Microsoft asks you to sign in, sign in with your Amazon account.</li>
                 <li>Wait until the SharePoint folder finishes loading. You should see the files.</li>
                 <li>Leave that tab open.</li>
                 <li>Click the Peculiar tab at the top of Firefox to come back.</li>
@@ -2037,15 +2042,20 @@
       accessDeniedOpen = true;
       hideExcelLock();
       setOpen(true);
-      shadow.getElementById("accessTitle").textContent = stillBlocked
-        ? "STILL BLOCKED. THE FILE WAS NOT CREATED."
-        : heldSaves.length
-          ? "YOUR SCANS WERE NOT SAVED"
-          : "YOU CANNOT SAVE YET";
+      const signedOut = /\b401\b/.test(String(lastError || ""));
+      shadow.getElementById("accessTitle").textContent = signedOut
+        ? "SHAREPOINT IS NOT SIGNED IN"
+        : stillBlocked
+          ? "STILL BLOCKED. THE FILE WAS NOT CREATED."
+          : heldSaves.length
+            ? "YOUR SCANS WERE NOT SAVED"
+            : "YOU CANNOT SAVE YET";
       shadow.getElementById("accessFile").textContent = `${who}  ·  ${file}`;
-      shadow.getElementById("accessMsg").textContent = stillBlocked
-        ? "SharePoint blocked you again. Click OPEN THE FOLDER, wait for that page to load, then press RETRY."
-        : "SharePoint blocked you. No file was created. This box stays here until the save works. RETRY is the only way to close it.";
+      shadow.getElementById("accessMsg").textContent = signedOut
+        ? "Click the yellow button. Sign in if Microsoft asks. Wait for the folder. Come back here and press RETRY."
+        : stillBlocked
+          ? "SharePoint blocked you again. Click OPEN THE FOLDER, wait for that page to load, then press RETRY."
+          : "SharePoint blocked you. No file was created. This box stays here until the save works. RETRY is the only way to close it.";
       shadow.getElementById("accessdeny").classList.add("open");
       const button = shadow.getElementById("accessRetry");
       button.disabled = false;
