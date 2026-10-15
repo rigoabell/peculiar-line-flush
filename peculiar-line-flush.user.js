@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.4
+// @version      2.9.5
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -11,7 +11,7 @@
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/*
 // @connect      amazon-my.sharepoint.com
 // @connect      raw.githubusercontent.com
-// @run-at       document-idle
+// @run-at       document-end
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addValueChangeListener
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.4";
+  const VERSION = "2.9.5";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -114,6 +114,8 @@
   const host = location.hostname;
   const isPeculiar = /peculiar-inventory|aft-aging-inventory/i.test(host);
   const isTop = window.top === window.self;
+  let updateNotice = "";
+  let updateNoticeUntil = 0;
 
   let lastError = "";
   let lastDebug = null;
@@ -397,6 +399,37 @@
     };
   }
 
+  function docsToSearch(rootDoc) {
+    const docs = [];
+    const add = (doc) => {
+      if (!doc || docs.includes(doc)) return;
+      docs.push(doc);
+      let frames = [];
+      try {
+        frames = doc.querySelectorAll("iframe, frame");
+      } catch {
+        return;
+      }
+      frames.forEach((frame) => {
+        try {
+          add(frame.contentDocument);
+        } catch {
+          /* A cross-origin frame has its own copy of this script. */
+        }
+      });
+    };
+    add(rootDoc || document);
+    return docs;
+  }
+
+  function findSearchInput() {
+    for (const doc of docsToSearch()) {
+      const input = doc.querySelector("#searchContainerInput");
+      if (input) return input;
+    }
+    return null;
+  }
+
   function popoverRoots() {
     const seen = new Set();
     const out = [];
@@ -405,8 +438,10 @@
       seen.add(n);
       out.push(n);
     };
-    document.querySelectorAll(".a-popover-inner, .a-popover-content, [id^='a-popover-content']").forEach(add);
-    document.querySelectorAll(".a-popover:not(.a-hidden), [id^='a-popover']:not(.a-hidden)").forEach(add);
+    for (const doc of docsToSearch()) {
+      doc.querySelectorAll(".a-popover-inner, .a-popover-content, [id^='a-popover-content']").forEach(add);
+      doc.querySelectorAll(".a-popover:not(.a-hidden), [id^='a-popover']:not(.a-hidden)").forEach(add);
+    }
     return out;
   }
 
@@ -456,13 +491,14 @@
   }
 
   function submitPeculiarSearch(containerId) {
-    const pecInput = document.querySelector("#searchContainerInput");
+    const pecInput = findSearchInput();
     if (!pecInput) throw new Error("Peculiar search box not found. Open MEM3 overview or Reverse Logistics.");
+    const doc = pecInput.ownerDocument;
     setInputValue(pecInput, containerId);
     const submit =
-      document.querySelector("#searchContainerButton input.a-button-input") ||
-      document.querySelector("#searchContainerButton .a-button-input") ||
-      document.querySelector("#searchContainerButton");
+      doc.querySelector("#searchContainerButton input.a-button-input") ||
+      doc.querySelector("#searchContainerButton .a-button-input") ||
+      doc.querySelector("#searchContainerButton");
     if (submit) submit.click();
     else pecInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
     pecInput.blur();
@@ -527,7 +563,7 @@
   }
 
   function peculiarFresh() {
-    if (isPeculiar && document.querySelector("#searchContainerInput")) return true;
+    if (isPeculiar && findSearchInput()) return true;
     const t = Number(GM_getValue(KEYS.heartbeat, 0)) || 0;
     return Date.now() - t < HEARTBEAT_STALE_MS;
   }
@@ -568,7 +604,7 @@
         url,
         headers: opts.headers || {},
         data: opts.body,
-        anonymous: false,
+        anonymous: opts.anonymous === true,
         onload: (res) => resolve(res),
         onerror: () => reject(new Error("Network error talking to SharePoint.")),
         ontimeout: () => reject(new Error("SharePoint timed out.")),
@@ -1383,12 +1419,11 @@
     if (document.getElementById("plf-scan-host")) return;
     const hostEl = document.createElement("div");
     hostEl.id = "plf-scan-host";
-    Object.assign(hostEl.style, {
-      position: "fixed",
-      inset: "0",
-      zIndex: "2147483646",
-      fontFamily: "Segoe UI, system-ui, sans-serif",
-    });
+    hostEl.style.setProperty("position", "fixed", "important");
+    hostEl.style.setProperty("inset", "0", "important");
+    hostEl.style.setProperty("z-index", "2147483646", "important");
+    hostEl.style.setProperty("pointer-events", "none", "important");
+    hostEl.style.setProperty("font-family", "Segoe UI, system-ui, sans-serif", "important");
     const shadow = hostEl.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
@@ -1966,7 +2001,10 @@
       shadow.getElementById("lampSp").className = "lamp" + (spOk ? " ok" : " bad");
       const ses = GM_getValue(KEYS.session, null);
       const today = ses?.day === dayStamp() && ses?.name;
-      if (lastError) {
+      if (updateNotice && updateNoticeUntil && Date.now() > updateNoticeUntil) updateNotice = "";
+      if (updateNotice) {
+        shadow.getElementById("footMsg").textContent = updateNotice;
+      } else if (lastError) {
         shadow.getElementById("footMsg").innerHTML = `<span style="color:#9b1c1c">Save error: ${escapeHtml(clip(lastError, 160))}</span>`;
       } else if (today && fileOk) {
         const where = selectedLocation ? ` · ${escapeHtml(selectedLocation)}` : "";
@@ -2679,13 +2717,11 @@
     const host = document.createElement("div");
     host.id = "plf-update";
     host.dataset.remote = remoteVersion;
-    Object.assign(host.style, {
-      position: "fixed",
-      inset: "0",
-      zIndex: "2147483646",
-      display: "block",
-      pointerEvents: "auto",
-    });
+    host.style.setProperty("position", "fixed", "important");
+    host.style.setProperty("inset", "0", "important");
+    host.style.setProperty("z-index", "2147483647", "important");
+    host.style.setProperty("display", "block", "important");
+    host.style.setProperty("pointer-events", "auto", "important");
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
@@ -2739,47 +2775,133 @@
         </div>
       </div>`;
     shadow.getElementById("installUpdate").addEventListener("click", () => {
-      GM_openInTab(UPDATE_URL, { active: true, insert: true });
+      try {
+        GM_openInTab(UPDATE_URL, { active: true, insert: true });
+      } catch {
+        window.open(UPDATE_URL, "_blank", "noopener");
+      }
     });
     document.documentElement.append(host);
+  }
+
+  function noteUpdate(text, sticky) {
+    updateNotice = text || "";
+    updateNoticeUntil = !text || sticky ? 0 : Date.now() + 8000;
+    const foot = document.getElementById("plf-scan-host")?.shadowRoot?.getElementById("footMsg");
+    if (foot && updateNotice) foot.textContent = updateNotice;
+  }
+
+  async function readPublishedScript() {
+    const url = `${UPDATE_URL}?plf=${Date.now()}`;
+    let gmError = "";
+    try {
+      const res = await gmReq(url, { timeout: 15000, anonymous: true });
+      if (res.status >= 200 && res.status < 300 && res.responseText) return res.responseText;
+      gmError = `GitHub HTTP ${res.status || 0}`;
+    } catch (err) {
+      gmError = err.message || String(err);
+    }
+    try {
+      const res = await fetch(url, { cache: "no-store", credentials: "omit" });
+      if (res.ok) return await res.text();
+      throw new Error(`GitHub HTTP ${res.status}`);
+    } catch (err) {
+      throw new Error(gmError || err.message || String(err));
+    }
   }
 
   async function checkForScriptUpdate() {
     if (updateCheckRunning) return;
     updateCheckRunning = true;
     try {
-      const res = await gmReq(`${UPDATE_URL}?plf=${Date.now()}`, { timeout: 15000 });
-      if (res.status < 200 || res.status >= 300) return;
-      const remote = versionInScript(res.responseText);
+      const text = await readPublishedScript();
+      const remote = versionInScript(text);
       if (!remote || !versionIsNewer(remote, VERSION)) {
         document.getElementById("plf-update")?.remove();
+        noteUpdate(`${SCRIPT_NAME} ${VERSION} is the newest version.`);
         return;
       }
+      noteUpdate(`New version ${remote} is ready.`, true);
       showUpdateReady(remote);
-    } catch {
-      /* Scanning keeps working if GitHub cannot be reached. */
+    } catch (err) {
+      noteUpdate(`Update check failed: ${err.message || err}`, true);
     } finally {
       updateCheckRunning = false;
     }
   }
 
-  if (isPeculiar && isTop) {
-    const watchOtherPanel = new MutationObserver(() => {
-      if (otherScanPanelOn()) showOldScriptWarning();
-    });
-    watchOtherPanel.observe(document.documentElement, { childList: true, subtree: true });
-    const checkOtherPanel = () => {
+  function frameShouldRun() {
+    if (!isPeculiar) return false;
+    if (isTop) return true;
+    if (!document.querySelector("#searchContainerInput")) return false;
+    try {
+      if (window.top.document.querySelector("#searchContainerInput")) return false;
+    } catch {
+      return true;
+    }
+    return true;
+  }
+
+  function showBootError(message) {
+    let el = document.getElementById("plf-boot-error");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "plf-boot-error";
+      el.style.setProperty("position", "fixed", "important");
+      el.style.setProperty("left", "12px", "important");
+      el.style.setProperty("right", "12px", "important");
+      el.style.setProperty("bottom", "12px", "important");
+      el.style.setProperty("z-index", "2147483647", "important");
+      el.style.setProperty("background", "#ffffff", "important");
+      el.style.setProperty("color", "#111111", "important");
+      el.style.setProperty("border", "3px solid #111111", "important");
+      el.style.setProperty("border-radius", "10px", "important");
+      el.style.setProperty("padding", "12px 14px", "important");
+      el.style.setProperty("font", "700 16px/1.4 Segoe UI, sans-serif", "important");
+      document.documentElement.append(el);
+    }
+    el.textContent = message;
+  }
+
+  function bootLineFlush() {
+    try {
+      if (!frameShouldRun()) return;
+      document.getElementById("plf-boot-error")?.remove();
       if (otherScanPanelOn()) showOldScriptWarning();
       else if (!document.getElementById("plf-old-script")) startLineFlush();
+    } catch (err) {
+      showBootError(`${SCRIPT_NAME} did not start: ${err.message || err}`);
+    }
+  }
+
+  if (isPeculiar) {
+    let armed = false;
+    let bootTimer = 0;
+    const tryBoot = () => {
+      if (!frameShouldRun()) return;
+      if (!armed) {
+        armed = true;
+        const watchOtherPanel = new MutationObserver(() => {
+          if (bootTimer) return;
+          bootTimer = setTimeout(() => {
+            bootTimer = 0;
+            bootLineFlush();
+          }, 200);
+        });
+        watchOtherPanel.observe(document.documentElement, { childList: true, subtree: true });
+        checkForScriptUpdate();
+        setInterval(checkForScriptUpdate, 2 * 60 * 1000);
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") {
+            bootLineFlush();
+            checkForScriptUpdate();
+          }
+        });
+      }
+      bootLineFlush();
     };
-    checkOtherPanel();
-    setTimeout(checkOtherPanel, 400);
-    setTimeout(checkOtherPanel, 1200);
-    setTimeout(checkOtherPanel, 3000);
-    checkForScriptUpdate();
-    setInterval(checkForScriptUpdate, 2 * 60 * 1000);
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") checkForScriptUpdate();
-    });
+    tryBoot();
+    [400, 1200, 3000, 6000].forEach((ms) => setTimeout(tryBoot, ms));
+    setInterval(tryBoot, 2000);
   }
 })();
