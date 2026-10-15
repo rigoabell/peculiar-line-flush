@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.6
+// @version      2.9.7
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.6";
+  const VERSION = "2.9.7";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1652,6 +1652,32 @@
           font: 12px/1.4 Consolas, "Courier New", monospace;
         }
         .dbg-actions { display: flex; gap: 8px; justify-content: flex-end; }
+        .sharebox {
+          display: none; position: absolute; inset: 0; z-index: 40;
+          align-items: center; justify-content: center; padding: 16px;
+          background: rgba(255,255,255,.94);
+        }
+        .sharebox.open { display: flex; }
+        .sharebox-card {
+          width: min(460px, 100%);
+          display: flex; flex-direction: column; gap: 10px;
+          padding: 16px; background: #ffffff; color: #111111;
+          border: 3px solid #111111; border-radius: 12px;
+        }
+        .sharebox-title { font-size: 22px; font-weight: 900; }
+        .sharebox-lead { margin: 0; font-size: 16px; font-weight: 700; line-height: 1.35; }
+        .sharebox-url {
+          font: 700 13px/1.4 Consolas, "Courier New", monospace;
+          word-break: break-all;
+          border: 2px solid #111111; border-radius: 8px; padding: 8px 10px;
+          background: #f7f7f7; color: #111111;
+        }
+        #shareStatus { min-height: 1.3em; font-size: 15px; font-weight: 800; }
+        #shareGo {
+          height: 52px; font-size: 18px; font-weight: 900;
+          background: #111111; color: #ffffff; border: 2px solid #111111;
+        }
+        #shareClose { height: 40px; font-weight: 800; }
         .excelock {
           display: none; position: absolute; inset: 0; z-index: 60;
           align-items: center; justify-content: center; padding: 16px;
@@ -1739,6 +1765,7 @@
             </div>
             <div class="counts" id="counts"></div>
                 <div class="clock" id="clock">00:00:00</div>
+            <button id="share" type="button" title="Share the Tampermonkey install link">Share</button>
             <button id="debug" title="Copy debug JSON">Debug</button>
               <button class="x" id="close" title="Close">×</button>
             </div>
@@ -1783,6 +1810,16 @@
                 <button id="dbgCopy" type="button">Copy</button>
                 <button id="dbgClose" type="button">Close</button>
               </div>
+            </div>
+          </div>
+          <div class="sharebox" id="sharebox">
+            <div class="sharebox-card">
+              <div class="sharebox-title">Share the install link</div>
+              <p class="sharebox-lead">This link installs Peculiar Line Flush in Tampermonkey. The other person opens it in Firefox and clicks Install.</p>
+              <div class="sharebox-url" id="shareUrl"></div>
+              <div id="shareStatus"></div>
+              <button id="shareGo" type="button">SHARE THE INSTALL LINK</button>
+              <button id="shareClose" type="button">Close</button>
             </div>
           </div>
           <div class="excelock" id="excelock">
@@ -1850,6 +1887,8 @@
 
     function focusScanBox() {
       if (!open || excelLockOpen || accessDeniedOpen || anotherFieldHasFocus()) return;
+      if (shadow.getElementById("sharebox")?.classList.contains("open")) return;
+      if (shadow.getElementById("dbg")?.classList.contains("open")) return;
       input.focus();
     }
     const scanQueue = [];
@@ -2358,6 +2397,51 @@
     });
     const debugPanel = shadow.getElementById("dbg");
     const debugText = shadow.getElementById("dbgText");
+    const sharePanel = shadow.getElementById("sharebox");
+    const shareStatus = shadow.getElementById("shareStatus");
+    shadow.getElementById("shareUrl").textContent = UPDATE_URL;
+
+    function closeShare() {
+      sharePanel.classList.remove("open");
+      focusScanBox();
+    }
+
+    async function shareInstallLink() {
+      let shared = false;
+      try {
+        if (navigator.share) {
+          await navigator.share({
+            title: SCRIPT_NAME,
+            text: "Install Peculiar Line Flush in Tampermonkey.",
+            url: UPDATE_URL,
+          });
+          shared = true;
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+      }
+      let copied = false;
+      try {
+        GM_setClipboard(UPDATE_URL, "text");
+        copied = true;
+      } catch {
+        copied = false;
+      }
+      if (shared) shareStatus.textContent = "The install link was shared.";
+      else if (copied) shareStatus.textContent = "The install link was copied. Paste it to the other person.";
+      else shareStatus.textContent = "Copy failed. Select the link above and press Ctrl+C.";
+    }
+
+    shadow.getElementById("share").addEventListener("click", () => {
+      shareStatus.textContent = "";
+      sharePanel.classList.add("open");
+    });
+    shadow.getElementById("shareGo").addEventListener("click", () => {
+      shareInstallLink().catch(() => {
+        shareStatus.textContent = "Copy failed. Select the link above and press Ctrl+C.";
+      });
+    });
+    shadow.getElementById("shareClose").addEventListener("click", () => closeShare());
 
     function closeDebug() {
       debugPanel.classList.remove("open");
@@ -2595,6 +2679,11 @@
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         if (e.key === "Escape") {
           e.preventDefault();
+          if (shadow.getElementById("sharebox").classList.contains("open")) {
+            shadow.getElementById("sharebox").classList.remove("open");
+            focusScanBox();
+            return;
+          }
           if (debugPanel.classList.contains("open")) {
             closeDebug();
             return;
