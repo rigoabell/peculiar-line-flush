@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.13
+// @version      2.9.14
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.13";
+  const VERSION = "2.9.14";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1618,6 +1618,13 @@
         }
         #q::placeholder, #filter::placeholder { color: #667085; }
         #q:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(17,17,17,.12); }
+        #clipSearch {
+          flex: 0 1 auto; max-width: min(320px, 40vw); height: 38px;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          font-size: 14px; font-weight: 800;
+          background: #111111; color: #ffffff; border: 2px solid #111111;
+        }
+        #clipSearch:hover { background: #333333; color: #ffffff; }
         .ageboard {
           display: flex; align-items: baseline; gap: 10px;
           margin: 8px 10px 0; padding: 6px 12px;
@@ -1842,6 +1849,7 @@
             <select id="location" title="Location"></select>
             <button id="delLoc" type="button" disabled title="Remove this custom location">Delete</button>
             <input id="q" type="text" placeholder="Scan container" autocomplete="off" spellcheck="false" />
+            <button id="clipSearch" type="button" title="Copy a container ID, then click SEARCH">SEARCH</button>
             </div>
           <div class="status ready" id="note">Ready</div>
             <div class="ageboard" id="ageBoard">
@@ -2778,6 +2786,65 @@
       enqueueScan(value);
       focusScanBox();
     }
+
+    const clipButton = shadow.getElementById("clipSearch");
+    let clipLabel = "SEARCH";
+    let clipValue = "";
+    function clipboardId(text) {
+      return cellText(String(text || "").split(/\r?\n/)[0]);
+    }
+    function paintClipButton(text) {
+      const id = clipboardId(text);
+      clipValue = id;
+      const label = id ? `SEARCH [${id}]` : "SEARCH";
+      if (label === clipLabel) return;
+      clipLabel = label;
+      clipButton.textContent = label;
+      clipButton.title = id ? `Search ${id}` : "Copy a container ID, then click SEARCH";
+    }
+    async function readClipboardText() {
+      const nav = (pageWindow && pageWindow.navigator) || navigator;
+      if (!nav.clipboard || typeof nav.clipboard.readText !== "function") return "";
+      return await nav.clipboard.readText();
+    }
+    function refreshClipboard() {
+      readClipboardText().then(paintClipButton).catch(() => {});
+    }
+    function onCopied() {
+      const selected = cellText(String(document.getSelection?.().toString() || ""));
+      if (selected) paintClipButton(selected);
+      setTimeout(refreshClipboard, 0);
+    }
+    clipButton.addEventListener("click", () => {
+      const shown = clipValue;
+      readClipboardText()
+        .then((text) => {
+          const id = clipboardId(text) || shown;
+          paintClipButton(id);
+          if (!id) {
+            setBanner("error", "Copy a container ID first. Then click SEARCH.");
+            return;
+          }
+          enqueueScan(id);
+        })
+        .catch(() => {
+          if (shown) {
+            enqueueScan(shown);
+            return;
+          }
+          setBanner("error", "Click Allow if Firefox asks to read the clipboard. Then click SEARCH again.");
+        });
+    });
+    document.addEventListener("copy", onCopied, true);
+    document.addEventListener("cut", onCopied, true);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshClipboard();
+    });
+    pageWindow.addEventListener("focus", refreshClipboard);
+    setInterval(() => {
+      if (!document.hidden) refreshClipboard();
+    }, 250);
+    refreshClipboard();
 
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
