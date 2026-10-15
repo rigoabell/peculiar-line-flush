@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.2
+// @version      2.9.3
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -41,7 +41,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.2";
+  const VERSION = "2.9.3";
   const SCRIPT_NAME = "Peculiar Line Flush";
   const OLD_SCRIPT_NAME = "Peculiar Inventory Scan Panel";
   const PECULIAR_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
@@ -462,6 +462,8 @@
       document.querySelector("#searchContainerButton");
     if (submit) submit.click();
     else pecInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
+    pecInput.blur();
+    if (submit instanceof HTMLElement) submit.blur();
   }
 
   function waitForPopover(containerId, ms) {
@@ -1734,7 +1736,8 @@
       const outer = document.activeElement;
       if (!(outer instanceof HTMLElement)) return false;
       if (outer === hostEl || outer === document.body || outer === document.documentElement) return false;
-      return true;
+      if (outer.id === "searchContainerInput" || outer.closest("#searchContainerButton")) return false;
+      return isTextField(outer);
     }
 
     function focusScanBox() {
