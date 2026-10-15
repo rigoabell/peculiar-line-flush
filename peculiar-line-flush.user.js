@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.8
+// @version      2.9.9
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.8";
+  const VERSION = "2.9.9";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -478,14 +478,25 @@
     return r.width > 8 && r.height > 8;
   }
 
+  function isNoRecord(text) {
+    return /no record found|no records found|not found|no inventory|does not exist|could not|internal failure/i.test(text);
+  }
+
   function scrapePopoverFor(containerId) {
     const want = cellText(containerId);
     let best = { ok: false, error: "NO_POPOVER" };
     for (const root of popoverRoots()) {
       const t = root.innerText || "";
       if (t.length < 12) continue;
-      const hasDetails = /Oldest Units Age|Total units|Container details/i.test(t);
-      const hasError = /could not|not found|no inventory|does not exist|internal failure/i.test(t);
+      const hasAge = /Oldest Units Age|Total units/i.test(t);
+      const hasDetails = hasAge || /Container details/i.test(t);
+      if (isNoRecord(t) && !hasAge) {
+        if (best.error !== "NOT_FOUND" || t.length > cellText(best.raw).length) {
+          best = { ok: false, error: "NOT_FOUND", raw: t, containerId: want };
+        }
+        continue;
+      }
+      if (best.error === "NOT_FOUND") continue;
       if (hasDetails && (!want || textHasId(t, want))) {
         const parsed = parseDetailsText(t);
         if (parsed.oldestAge || (parsed.inventory && parsed.inventory.length)) {
@@ -498,12 +509,8 @@
         continue;
       }
       if (hasDetails && want && !textHasId(t, want)) {
+        if (cellText(t).toLowerCase() === "container details" && best.raw) continue;
         best = { ok: false, error: "STALE", raw: t };
-        continue;
-      }
-      if (hasError && !hasDetails) {
-        if (!want || textHasId(t, want)) best = { ok: false, error: "NOT_FOUND", raw: t };
-        else best = { ok: false, error: "STALE", raw: t };
       }
     }
     return best;
@@ -552,6 +559,7 @@
   function popoverStillShell(result, containerId) {
     const raw = cellText(result?.raw);
     if (!raw) return true;
+    if (isNoRecord(raw)) return false;
     if (/Oldest Units Age|Total units/i.test(raw)) return false;
     return !textHasId(raw, containerId) || raw.length < 80;
   }
@@ -578,7 +586,7 @@
         }
         if (result.error === "NOT_FOUND") {
           if (!notFoundSince) notFoundSince = Date.now();
-          if (Date.now() - notFoundSince >= 200) finish(result);
+          if (Date.now() - notFoundSince >= 600) finish(result);
           return;
         }
         notFoundSince = 0;
@@ -2148,7 +2156,7 @@
         return;
       }
       if (result.error === "NOT_FOUND" || result.error === "NOT FOUND") {
-        apply({ bg: "#e24b4b", border: "#b71c1c" }, "AGE", "Not found", "ALERT");
+        apply({ bg: "#e24b4b", border: "#b71c1c" }, "AGE", "No record", "ALERT");
         return;
       }
       if (result.ok === false && result.error) {
@@ -2664,7 +2672,7 @@
           result.ok ? "found" : result.error === "NOT_FOUND" ? "missing" : "error",
           result.ok
             ? `<strong>SAVING</strong> ${escapeHtml(id)} · ${escapeHtml(location)}${extra}`
-            : `<strong>${escapeHtml(status)}</strong> ${escapeHtml(id)} · ${escapeHtml(location)}${extra}`
+            : `<strong>${result.error === "NOT_FOUND" ? "NO RECORD FOUND" : escapeHtml(status)}</strong> ${escapeHtml(id)} · ${escapeHtml(location)}${extra}`
         );
         const rows = rowsFromResult(id, result, who);
         enqueueSave(() => appendSosRows(rows, who, location))
@@ -2678,7 +2686,7 @@
               result.ok ? "found" : result.error === "NOT_FOUND" ? "missing" : "error",
               result.ok
                 ? `<strong>SAVED</strong> ${escapeHtml(id)} · ${escapeHtml(location)}`
-                : `<strong>${escapeHtml(status)}</strong> · ${escapeHtml(session.name)}`
+                : `<strong>${result.error === "NOT_FOUND" ? "NO RECORD FOUND" : escapeHtml(status)}</strong> · ${escapeHtml(session.name)}`
             );
           })
           .catch((err) => {
