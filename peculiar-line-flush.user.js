@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.10
+// @version      2.9.11
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.10";
+  const VERSION = "2.9.11";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -243,9 +243,9 @@
     if (!s) return null;
     let days = 0;
     let hit = false;
-    const d = s.match(/(\d+(?:\.\d+)?)\s*d(?:ays?)?\b/);
-    const h = s.match(/(\d+(?:\.\d+)?)\s*h(?:ours?)?\b/);
-    const m = s.match(/(\d+(?:\.\d+)?)\s*m(?:in(?:utes?)?)?\b/);
+    const d = s.match(/(\d+(?:\.\d+)?)\s*(?:days?|d)\b/);
+    const h = s.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/);
+    const m = s.match(/(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m)\b/);
     if (d) {
       days += Number(d[1]);
       hit = true;
@@ -300,18 +300,17 @@
     if (days == null || Number.isNaN(days)) {
       return { bg: "#ffffff", fg: "#111111", border: "#d8dee8", label: "—", pct: 0 };
     }
-    let h;
-    if (days <= 3) h = 142 - (days / 3) * 44;
-    else if (days <= 5) h = 98 - ((days - 3) / 2) * 50;
-    else h = 48 - Math.min(1, (days - 5) / 4) * 48;
-    const s = 72;
-    const l = h > 35 && h < 85 ? 46 : 34;
+    const age = Math.max(0, days);
+    const h = Math.round(120 * (1 - Math.min(age, 5) / 5));
+    const s = 78;
+    const l = h > 35 && h < 90 ? 46 : 34;
+    const bg = `hsl(${h}, ${s}%, ${l}%)`;
     return {
-      bg: `hsl(${Math.round(h)}, ${s}%, ${l}%)`,
-      fg: contrastInk(`hsl(${Math.round(h)}, ${s}%, ${l}%)`),
-      border: `hsl(${Math.round(h)}, ${s}%, ${Math.max(18, l - 14)}%)`,
-      label: days <= 3 ? "GOOD" : days <= 5 ? "CAUTION" : "ALERT",
-      pct: Math.max(2, Math.min(98, (days / 10) * 100)),
+      bg,
+      fg: contrastInk(bg),
+      border: `hsl(${h}, ${s}%, ${Math.max(18, l - 14)}%)`,
+      label: age >= 5 ? "ALERT" : age >= 2 ? "CAUTION" : "GOOD",
+      pct: Math.max(2, Math.min(100, (Math.min(age, 5) / 5) * 100)),
     };
   }
 
@@ -1710,13 +1709,15 @@
           height: auto; overflow: auto; pointer-events: auto;
         }
         .locprompt.open, .dbg.open, .sharebox.open, .excelock.open, .accessdeny.open { display: block; }
-        .locprompt, .sharebox, .excelock { z-index: 40; width: min(480px, calc(100vw - 24px)); }
+        .locprompt, .sharebox, .excelock { z-index: 40; width: min(640px, calc(100vw - 24px)); }
+        .howto { margin: 0; padding-left: 28px; }
+        .howto li { font-size: 18px; font-weight: 800; line-height: 1.35; margin: 8px 0; }
         .sharebox { z-index: 41; }
         .dbg { z-index: 50; width: min(640px, calc(100vw - 24px)); }
         .excelock { z-index: 60; }
         .accessdeny { z-index: 70; width: min(720px, calc(100vw - 24px)); }
         .locprompt-card {
-          width: min(420px, calc(100vw - 24px));
+          width: min(640px, calc(100vw - 24px));
           display: flex; flex-direction: column; gap: 8px;
           padding: 14px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1744,7 +1745,7 @@
         }
         .dbg-actions { display: flex; gap: 8px; justify-content: flex-end; }
         .sharebox-card {
-          width: min(480px, calc(100vw - 24px));
+          width: min(640px, calc(100vw - 24px));
           display: flex; flex-direction: column; gap: 10px;
           padding: 16px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1765,13 +1766,13 @@
         }
         #shareClose { height: 40px; font-weight: 800; }
         .excelock-card {
-          width: min(480px, calc(100vw - 24px));
+          width: min(640px, calc(100vw - 24px));
           display: flex; flex-direction: column; gap: 10px;
           padding: 16px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
           box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
-        .excelock-title { font-size: 18px; font-weight: 800; }
+        .excelock-title { font-size: 22px; font-weight: 900; }
         .excelock-file {
           font: 700 15px/1.4 Consolas, "Courier New", monospace;
           word-break: break-all;
@@ -1888,6 +1889,15 @@
       <div class="dbg" id="dbg">
         <div class="dbg-card">
           <div class="dbg-title">Debug</div>
+          <ol class="howto">
+            <li>Click Copy.</li>
+            <li>Open the chat where you were asked for this.</li>
+            <li>Click the message box.</li>
+            <li>Press Ctrl+V to paste.</li>
+            <li>Press Enter to send it.</li>
+            <li>Click Close.</li>
+            <li>Click the scan box and keep scanning.</li>
+          </ol>
           <textarea id="dbgText" spellcheck="false"></textarea>
           <div class="dbg-actions">
             <button id="dbgCopy" type="button">Copy</button>
@@ -1898,7 +1908,15 @@
       <div class="sharebox" id="sharebox">
         <div class="sharebox-card">
           <div class="sharebox-title">Share the install link</div>
-          <p class="sharebox-lead">This link installs Peculiar Line Flush in Tampermonkey. The other person opens it in Firefox and clicks Install.</p>
+          <ol class="howto">
+            <li>Click the black SHARE THE INSTALL LINK button.</li>
+            <li>Open Chime or email.</li>
+            <li>Click the message box. Press Ctrl+V. Send it.</li>
+            <li>Tell them to open that link in Firefox.</li>
+            <li>On the page that opens, they click Install.</li>
+            <li>They click the Peculiar tab to come back.</li>
+            <li>They press F5 to refresh. Then they can scan.</li>
+          </ol>
           <div class="sharebox-url" id="shareUrl"></div>
           <div id="shareStatus"></div>
           <button id="shareGo" type="button">SHARE THE INSTALL LINK</button>
@@ -1910,6 +1928,14 @@
           <div class="excelock-title">Excel file is open</div>
           <div class="excelock-file" id="excelockFile"></div>
           <div class="excelock-msg" id="excelockMsg">Close that file in Excel, then press RETRY.</div>
+          <ol class="howto">
+            <li>Read the file name in the box above.</li>
+            <li>Click Excel on the taskbar.</li>
+            <li>Find that file. Click the X to close it.</li>
+            <li>Come back to this Peculiar tab. Do not press F5.</li>
+            <li>Click the black RETRY button.</li>
+            <li>This box stays here until the save works.</li>
+          </ol>
           <button id="excelockRetry" type="button">RETRY</button>
         </div>
       </div>
@@ -1918,11 +1944,15 @@
           <div class="accessdeny-stop">STOP</div>
           <div class="accessdeny-title" id="accessTitle">YOUR SCANS WERE NOT SAVED</div>
           <div class="accessdeny-file" id="accessFile"></div>
-          <ol class="accessdeny-steps">
-            <li>Click the yellow button. It opens the SharePoint folder.</li>
-            <li>Wait until that page finishes loading. Leave it open.</li>
-            <li>Come back to this page and press RETRY.</li>
-          </ol>
+              <ol class="accessdeny-steps">
+                <li>Click the yellow OPEN THE FOLDER button.</li>
+                <li>A new tab opens. Wait. Do not click around.</li>
+                <li>Wait until the SharePoint folder finishes loading. You should see the files.</li>
+                <li>Leave that tab open.</li>
+                <li>Click the Peculiar tab at the top of Firefox to come back.</li>
+                <li>Click the black RETRY button on this box.</li>
+                <li>If it still says STOP, you need Can edit. Ask for that, then click RETRY again.</li>
+              </ol>
           <div id="accessMsg">This box stays here until the save works. RETRY is the only way to close it.</div>
           <button id="accessOpen" type="button">OPEN THE FOLDER</button>
           <button id="accessRetry" type="button">RETRY</button>
@@ -1931,6 +1961,12 @@
       <div class="locprompt" id="locprompt">
         <div class="locprompt-card">
           <div class="locprompt-title">Select a location</div>
+          <ol class="howto">
+            <li>Click the location button for where you are.</li>
+            <li>If it is not listed, click Other and type the name.</li>
+            <li>The scan saves after you pick one.</li>
+            <li>Click Cancel only if this scan should not be saved.</li>
+          </ol>
           <div class="locprompt-for" id="locpromptFor"></div>
           <div class="locprompt-list" id="locpromptList"></div>
           <div class="locprompt-actions">
@@ -2516,9 +2552,9 @@
       } catch {
         copied = false;
       }
-      if (shared) shareStatus.textContent = "The install link was shared.";
-      else if (copied) shareStatus.textContent = "The install link was copied. Paste it to the other person.";
-      else shareStatus.textContent = "Copy failed. Select the link above and press Ctrl+C.";
+      if (shared) shareStatus.textContent = "Shared. Tell them: open it in Firefox, click Install, come back to Peculiar, then press F5.";
+      else if (copied) shareStatus.textContent = "Copied. Now open Chime or email, click the message box, press Ctrl+V, and send it. Tell them to open it in Firefox, click Install, come back to Peculiar, and press F5.";
+      else shareStatus.textContent = "Copy failed. Click the link above, press Ctrl+A, then press Ctrl+C. Then paste it in Chime.";
     }
 
     shadow.getElementById("share").addEventListener("click", () => {
@@ -2527,7 +2563,7 @@
     });
     shadow.getElementById("shareGo").addEventListener("click", () => {
       shareInstallLink().catch(() => {
-        shareStatus.textContent = "Copy failed. Select the link above and press Ctrl+C.";
+        shareStatus.textContent = "Copy failed. Click the link above, press Ctrl+A, then press Ctrl+C. Then paste it in Chime.";
       });
     });
     shadow.getElementById("shareClose").addEventListener("click", () => closeShare());
@@ -2558,8 +2594,8 @@
       setBanner(
         copied ? "info" : "error",
         copied
-          ? "<strong>Debug copied.</strong> Paste it in chat. It is also shown here."
-          : "<strong>Clipboard blocked.</strong> The text is selected — press Ctrl+C."
+          ? "<strong>Debug copied.</strong> Open the chat. Click the message box. Press Ctrl+V. Press Enter."
+          : "<strong>Clipboard blocked.</strong> The text is selected. Press Ctrl+C. Then open the chat and press Ctrl+V."
       );
     }
 
@@ -2580,8 +2616,8 @@
       setBanner(
         copied ? "info" : "error",
         copied
-          ? "<strong>Debug copied.</strong> Paste it in chat."
-          : "<strong>Clipboard blocked.</strong> The text is selected — press Ctrl+C."
+          ? "<strong>Debug copied.</strong> Open the chat. Click the message box. Press Ctrl+V. Press Enter."
+          : "<strong>Clipboard blocked.</strong> The text is selected. Press Ctrl+C. Then open the chat and press Ctrl+V."
       );
     });
     shadow.getElementById("dbgClose").addEventListener("click", () => closeDebug());
@@ -3010,7 +3046,9 @@
             <li>Click the Tampermonkey icon. It is the puzzle piece at the top of Firefox.</li>
             <li>Find the red name above. Click its switch so it turns OFF.</li>
             <li>Leave Peculiar Line Flush ON.</li>
+            <li>Click this Peculiar tab to come back.</li>
             <li>Click the black button below.</li>
+            <li>If this box is still here, the old script is still on. Start again at step 1.</li>
           </ol>
           <button class="try" id="tryAgain" type="button">I TURNED THE OLD SCRIPT OFF</button>
         </div>`;
@@ -3068,7 +3106,7 @@
         .card {
           position: fixed; z-index: 1;
           left: 50%; top: 50%; transform: translate(-50%, -50%);
-          width: min(520px, calc(100vw - 24px));
+          width: min(640px, calc(100vw - 24px));
           max-height: calc(100vh - 24px);
           overflow: auto;
           background: #ffffff; color: #111111;
@@ -3084,8 +3122,8 @@
         .kicker { font-size: 12px; font-weight: 800; letter-spacing: .08em; }
         .name { font-size: 22px; font-weight: 900; line-height: 1.2; }
         .ver { font-size: 16px; font-weight: 800; }
-        .steps { margin: 0; padding-left: 20px; font-size: 15px; font-weight: 700; }
-        .steps li { margin: 4px 0; }
+        .steps { margin: 0; padding-left: 32px; }
+        .steps li { margin: 8px 0; font-size: 22px; font-weight: 900; line-height: 1.3; }
         .go {
           height: 56px; border: 2px solid #111111; border-radius: 10px;
           background: #111111; color: #ffffff;
@@ -3104,9 +3142,13 @@
             <div class="name">${escapeHtml(remoteVersion)}</div>
           </div>
           <ol class="steps">
-            <li>Click the button.</li>
-            <li>Tampermonkey opens. Click Install.</li>
-            <li>Come back to this page and refresh it.</li>
+            <li>Click the black button at the bottom of this box.</li>
+            <li>A new tab opens. That tab is Tampermonkey.</li>
+            <li>On that tab, click Install.</li>
+            <li>When it says the script was installed, close that tab.</li>
+            <li>Click the Peculiar tab at the top of Firefox to come back.</li>
+            <li>Press F5 to refresh this page.</li>
+            <li>Wait until the page loads. Then scan again.</li>
           </ol>
           <button class="go" id="installUpdate" type="button">Install the new Peculiar Line Flush</button>
         </div>`;
