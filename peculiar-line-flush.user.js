@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.7
+// @version      2.9.8
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -11,7 +11,7 @@
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/*
 // @connect      amazon-my.sharepoint.com
 // @connect      raw.githubusercontent.com
-// @run-at       document-end
+// @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addValueChangeListener
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.7";
+  const VERSION = "2.9.8";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -115,7 +115,31 @@
 
   const host = location.hostname;
   const isPeculiar = /peculiar-inventory|aft-aging-inventory/i.test(host);
-  const isTop = window.top === window.self;
+  const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+  let isTop = true;
+  try {
+    isTop = pageWindow.top === pageWindow.self;
+  } catch {
+    isTop = false;
+  }
+  let onScanKey = null;
+  let restoreScanFocus = null;
+  let seenScanStamp = -1;
+  let seenScanKey = "";
+
+  function deliverScanKey(e) {
+    if (!e || (e.timeStamp === seenScanStamp && e.key === seenScanKey)) return;
+    seenScanStamp = e.timeStamp;
+    seenScanKey = e.key;
+    if (typeof onScanKey === "function") onScanKey(e);
+  }
+
+  document.addEventListener("keydown", deliverScanKey, true);
+  try {
+    pageWindow.addEventListener("keydown", deliverScanKey, true);
+  } catch {
+    /* The page window is not reachable from this frame. */
+  }
   let updateNotice = "";
   let updateNoticeUntil = 0;
 
@@ -486,31 +510,58 @@
   }
 
   function setInputValue(el, value) {
-    const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
-    desc.set.call(el, value);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+    const view = el.ownerDocument?.defaultView || pageWindow;
+    const desc = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value");
+    if (desc?.set) desc.set.call(el, value);
+    else el.value = value;
+    try {
+      el.dispatchEvent(new view.InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));
+    } catch {
+      el.dispatchEvent(new view.Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new view.Event("change", { bubbles: true }));
+  }
+
+  function releasePageButton(doc) {
+    const active = doc?.activeElement;
+    if (!(active instanceof HTMLElement) || active === document.body) return;
+    const searchControl =
+      active.id === "searchContainerInput" || Boolean(active.closest?.("#searchContainerButton"));
+    if (searchControl || active.tagName === "BUTTON") active.blur();
   }
 
   function submitPeculiarSearch(containerId) {
     const pecInput = findSearchInput();
     if (!pecInput) throw new Error("Peculiar search box not found. Open MEM3 overview or Reverse Logistics.");
     const doc = pecInput.ownerDocument;
+    const view = doc.defaultView || pageWindow;
     setInputValue(pecInput, containerId);
     const submit =
       doc.querySelector("#searchContainerButton input.a-button-input") ||
       doc.querySelector("#searchContainerButton .a-button-input") ||
       doc.querySelector("#searchContainerButton");
+    if (cellText(pecInput.value) !== cellText(containerId)) setInputValue(pecInput, containerId);
     if (submit) submit.click();
-    else pecInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
+    else pecInput.dispatchEvent(new view.KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
     pecInput.blur();
     if (submit instanceof HTMLElement) submit.blur();
+    releasePageButton(doc);
+    if (typeof restoreScanFocus === "function") restoreScanFocus();
+  }
+
+  function popoverStillShell(result, containerId) {
+    const raw = cellText(result?.raw);
+    if (!raw) return true;
+    if (/Oldest Units Age|Total units/i.test(raw)) return false;
+    return !textHasId(raw, containerId) || raw.length < 80;
   }
 
   function waitForPopover(containerId, ms) {
     return new Promise((resolve) => {
       let finished = false;
       let notFoundSince = 0;
+      let retried = false;
+      const started = Date.now();
       const finish = (result) => {
         if (finished) return;
         finished = true;
@@ -531,9 +582,21 @@
           return;
         }
         notFoundSince = 0;
+        if (!retried && Date.now() - started > 1500 && popoverStillShell(result, containerId)) {
+          retried = true;
+          try {
+            submitPeculiarSearch(containerId);
+          } catch {
+            /* The first click already ran. Keep waiting for the popover. */
+          }
+        }
       };
       const obs = new MutationObserver(check);
-      obs.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+      for (const doc of docsToSearch()) {
+        if (doc.documentElement) {
+          obs.observe(doc.documentElement, { childList: true, subtree: true, characterData: true });
+        }
+      }
       const poll = setInterval(check, 40);
       const timer = setTimeout(() => {
         const last = scrapePopoverFor(containerId);
@@ -547,7 +610,7 @@
   async function searchPeculiarNow(containerId) {
     const t0 = Date.now();
     submitPeculiarSearch(containerId);
-    const result = await waitForPopover(containerId, 4000);
+    const result = await waitForPopover(containerId, 12000);
     result.lookupMs = Date.now() - t0;
     return result;
   }
@@ -1889,8 +1952,10 @@
       if (!open || excelLockOpen || accessDeniedOpen || anotherFieldHasFocus()) return;
       if (shadow.getElementById("sharebox")?.classList.contains("open")) return;
       if (shadow.getElementById("dbg")?.classList.contains("open")) return;
-      input.focus();
+      releasePageButton(document);
+      input.focus({ preventScroll: true });
     }
+    restoreScanFocus = focusScanBox;
     const scanQueue = [];
     const heldSaves = [];
     let working = false;
@@ -2666,54 +2731,62 @@
         run();
       }
     });
-    window.addEventListener(
-      "keydown",
-      (e) => {
-        if (!open) return;
-        if (excelLockOpen || accessDeniedOpen) {
-          e.preventDefault();
-          e.stopPropagation();
-          if (e.key === "Enter") retryHeldSaves();
+    function takeScanKey(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+    }
+
+    function scanKeyChar(e) {
+      if (e.key && e.key.length === 1) return e.key;
+      const code = e.keyCode || e.which || 0;
+      if (code >= 32 && code <= 126) return String.fromCharCode(code);
+      return "";
+    }
+
+    onScanKey = (e) => {
+      if (!open) return;
+      if (excelLockOpen || accessDeniedOpen) {
+        takeScanKey(e);
+        if (e.key === "Enter") retryHeldSaves();
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === "Escape") {
+        takeScanKey(e);
+        if (shadow.getElementById("sharebox").classList.contains("open")) {
+          shadow.getElementById("sharebox").classList.remove("open");
+          focusScanBox();
           return;
         }
-        if (e.ctrlKey || e.metaKey || e.altKey) return;
-        if (e.key === "Escape") {
-          e.preventDefault();
-          if (shadow.getElementById("sharebox").classList.contains("open")) {
-            shadow.getElementById("sharebox").classList.remove("open");
-            focusScanBox();
-            return;
-          }
-          if (debugPanel.classList.contains("open")) {
-            closeDebug();
-            return;
-          }
-          setOpen(false);
+        if (debugPanel.classList.contains("open")) {
+          closeDebug();
           return;
         }
-        const path = typeof e.composedPath === "function" ? e.composedPath() : [];
-        const filter = shadow.getElementById("filter");
-        if (path.includes(input) || path.includes(filter) || anotherFieldHasFocus()) return;
-        e.stopPropagation();
-        if (e.key === "Enter" || e.key === "Tab") {
-          e.preventDefault();
-          run();
-          return;
-        }
-        if (e.key === "Backspace") {
-          e.preventDefault();
-          input.focus();
-          input.value = input.value.slice(0, -1);
-          return;
-        }
-        if (e.key.length === 1) {
-          e.preventDefault();
-          input.focus();
-          input.value += e.key;
-        }
-      },
-      true
-    );
+        setOpen(false);
+        return;
+      }
+      const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+      const filter = shadow.getElementById("filter");
+      if (path.includes(input) || path.includes(filter) || anotherFieldHasFocus()) return;
+      if (e.key === "Enter" || e.key === "Tab") {
+        takeScanKey(e);
+        run();
+        return;
+      }
+      if (e.key === "Backspace") {
+        takeScanKey(e);
+        input.focus({ preventScroll: true });
+        input.value = input.value.slice(0, -1);
+        return;
+      }
+      const ch = scanKeyChar(e);
+      if (!ch) return;
+      takeScanKey(e);
+      input.focus({ preventScroll: true });
+      input.value += ch;
+    };
+    document.addEventListener("focusin", focusScanBox, true);
 
     renderStats();
     tick();
@@ -3074,7 +3147,7 @@
     if (isTop) return true;
     if (!document.querySelector("#searchContainerInput")) return false;
     try {
-      if (window.top.document.querySelector("#searchContainerInput")) return false;
+      if (pageWindow.top.document.querySelector("#searchContainerInput")) return false;
     } catch {
       return true;
     }
@@ -3082,6 +3155,7 @@
   }
 
   function showBootError(message) {
+    if (!document.documentElement) return;
     let el = document.getElementById("plf-boot-error");
     if (!el) {
       el = document.createElement("div");
@@ -3117,6 +3191,7 @@
     let armed = false;
     let bootTimer = 0;
     const tryBoot = () => {
+      if (!document.documentElement) return;
       if (!frameShouldRun()) return;
       if (!armed) {
         armed = true;
