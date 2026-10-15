@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.3
+// @version      2.9.4
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -10,6 +10,7 @@
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/*
 // @connect      amazon-my.sharepoint.com
+// @connect      raw.githubusercontent.com
 // @run-at       document-idle
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -41,7 +42,9 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.3";
+  const VERSION = "2.9.4";
+  const UPDATE_URL =
+    "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
   const OLD_SCRIPT_NAME = "Peculiar Inventory Scan Panel";
   const PECULIAR_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
@@ -572,6 +575,7 @@
       };
       if (opts.responseType) req.responseType = opts.responseType;
       if (opts.binary) req.binary = true;
+      if (opts.timeout) req.timeout = opts.timeout;
       GM_xmlhttpRequest(req);
     });
   }
@@ -2638,6 +2642,127 @@
     document.documentElement.append(host);
   }
 
+  function versionParts(value) {
+    return String(value || "")
+      .trim()
+      .split(".")
+      .map((part) => {
+        const n = parseInt(part, 10);
+        return Number.isFinite(n) ? n : 0;
+      });
+  }
+
+  function versionIsNewer(remote, local) {
+    const a = versionParts(remote);
+    const b = versionParts(local);
+    const n = Math.max(a.length, b.length);
+    for (let i = 0; i < n; i++) {
+      const diff = (a[i] || 0) - (b[i] || 0);
+      if (diff > 0) return true;
+      if (diff < 0) return false;
+    }
+    return false;
+  }
+
+  function versionInScript(text) {
+    const head = String(text || "").slice(0, 4000);
+    const match = head.match(/\/\/\s*@version\s+([0-9]+(?:\.[0-9]+){1,3})/);
+    return match ? match[1] : "";
+  }
+
+  let updateCheckRunning = false;
+
+  function showUpdateReady(remoteVersion) {
+    const existing = document.getElementById("plf-update");
+    if (existing?.dataset.remote === remoteVersion) return;
+    existing?.remove();
+    const host = document.createElement("div");
+    host.id = "plf-update";
+    host.dataset.remote = remoteVersion;
+    Object.assign(host.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "2147483646",
+      display: "block",
+      pointerEvents: "auto",
+    });
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <style>
+        :host { all: initial; }
+        * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
+        .wrap {
+          position: fixed; inset: 0; z-index: 1;
+          display: flex; align-items: center; justify-content: center;
+          padding: 16px; background: rgba(0,0,0,.55);
+        }
+        .card {
+          width: min(520px, 100%);
+          background: #ffffff; color: #111111;
+          border: 3px solid #111111; border-radius: 14px;
+          padding: 18px 18px 16px;
+          display: flex; flex-direction: column; gap: 12px;
+        }
+        .attn { font-size: 28px; font-weight: 900; letter-spacing: .04em; }
+        .lead { font-size: 16px; font-weight: 700; margin: 0; }
+        .box { border: 2px solid #111111; border-radius: 10px; padding: 10px 12px; }
+        .new { border-color: #0b6b2f; background: #e8f6ec; }
+        .kicker { font-size: 12px; font-weight: 800; letter-spacing: .08em; }
+        .name { font-size: 22px; font-weight: 900; line-height: 1.2; }
+        .ver { font-size: 16px; font-weight: 800; }
+        .steps { margin: 0; padding-left: 20px; font-size: 15px; font-weight: 700; }
+        .steps li { margin: 4px 0; }
+        .go {
+          height: 56px; border: 2px solid #111111; border-radius: 10px;
+          background: #111111; color: #ffffff;
+          font-size: 18px; font-weight: 900; cursor: pointer;
+        }
+      </style>
+      <div class="wrap">
+        <div class="card">
+          <div class="attn">⚠️ NEW VERSION</div>
+          <p class="lead">${escapeHtml(SCRIPT_NAME)} found a newer copy on its own.</p>
+          <div class="box">
+            <div class="kicker">ON THIS COMPUTER</div>
+            <div class="name">${escapeHtml(VERSION)}</div>
+          </div>
+          <div class="box new">
+            <div class="kicker">NEW COPY</div>
+            <div class="name">${escapeHtml(remoteVersion)}</div>
+          </div>
+          <ol class="steps">
+            <li>Click the button.</li>
+            <li>Tampermonkey opens. Click Install.</li>
+            <li>Come back to this page and refresh it.</li>
+          </ol>
+          <button class="go" id="installUpdate" type="button">Install the new Peculiar Line Flush</button>
+        </div>
+      </div>`;
+    shadow.getElementById("installUpdate").addEventListener("click", () => {
+      GM_openInTab(UPDATE_URL, { active: true, insert: true });
+    });
+    document.documentElement.append(host);
+  }
+
+  async function checkForScriptUpdate() {
+    if (updateCheckRunning) return;
+    updateCheckRunning = true;
+    try {
+      const res = await gmReq(`${UPDATE_URL}?plf=${Date.now()}`, { timeout: 15000 });
+      if (res.status < 200 || res.status >= 300) return;
+      const remote = versionInScript(res.responseText);
+      if (!remote || !versionIsNewer(remote, VERSION)) {
+        document.getElementById("plf-update")?.remove();
+        return;
+      }
+      showUpdateReady(remote);
+    } catch {
+      /* Scanning keeps working if GitHub cannot be reached. */
+    } finally {
+      updateCheckRunning = false;
+    }
+  }
+
   if (isPeculiar && isTop) {
     const watchOtherPanel = new MutationObserver(() => {
       if (otherScanPanelOn()) showOldScriptWarning();
@@ -2651,5 +2776,10 @@
     setTimeout(checkOtherPanel, 400);
     setTimeout(checkOtherPanel, 1200);
     setTimeout(checkOtherPanel, 3000);
+    checkForScriptUpdate();
+    setInterval(checkForScriptUpdate, 2 * 60 * 1000);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") checkForScriptUpdate();
+    });
   }
 })();
