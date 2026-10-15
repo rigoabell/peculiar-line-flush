@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.5
+// @version      2.9.6
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.5";
+  const VERSION = "2.9.6";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -53,6 +53,8 @@
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/Line Flush Records";
   const SOS_FOLDER_URL =
     "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com/Documents/IOL%20Assignments/Line%20Flush%20Records";
+  const SHARE_FOLDER_URL =
+    "https://amazon-my.sharepoint.com/:f:/p/abelrigm/IgC3aqxdaBJeQoeCFtcSkjRsAcsBA4G40s7Ra0q3aT1adac?e=8GQxFZ";
   const OLD_SOS_FOLDER =
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/SOS Report Upload Folder";
   const HEARTBEAT_MS = 4000;
@@ -637,7 +639,9 @@
         res.statusText ||
         String(res.status);
       lastError = `${res.status} ${typeof msg === "string" ? msg : JSON.stringify(msg)}`;
-      throw new Error(lastError);
+      const err = new Error(lastError);
+      if (isAccessDenied(res.status, lastError)) err.code = "ACCESS_DENIED";
+      throw err;
     }
     return json;
   }
@@ -1193,6 +1197,20 @@
     return status >= 400 && /locked|exclusive use|being edited|checked out|SPFileLock/i.test(String(text || ""));
   }
 
+  function isAccessDenied(status, text) {
+    const blob = `${status || ""} ${text || ""}`;
+    return Number(status) === 403 || /access denied|unauthorizedaccessexception|-2147024891/i.test(blob);
+  }
+
+  function accessDeniedError(name) {
+    const file = name || sosCache.name || "today's workbook";
+    lastError = `Access denied. ${file} was not created.`;
+    const err = new Error(lastError);
+    err.code = "ACCESS_DENIED";
+    err.fileName = file;
+    return err;
+  }
+
   function fileLockError(name) {
     const file = name || sosCache.name || "today's workbook";
     lastError = `Excel has ${file} open.`;
@@ -1209,19 +1227,21 @@
       ""
     )}',overwrite=true)?@p='${quotePath(SOS_FOLDER)}'`;
     const headers = {
-      Accept: "application/json;odata=nometadata",
+        Accept: "application/json;odata=nometadata",
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "X-RequestDigest": d,
+        "X-RequestDigest": d,
     };
     const body = bytesToBinaryString(bytes);
     const send = () => gmReq(url, { method: "POST", headers, body, binary: true });
     const res = await send();
     if (excelFileIsOpen(res.status, res.responseText)) throw fileLockError(name);
+    if (isAccessDenied(res.status, res.responseText)) throw accessDeniedError(name);
     if (res.status < 200 || res.status >= 300) {
       if (/404|DirectoryNotFound|File Not Found/i.test(`${res.status} ${res.responseText || ""}`)) {
         await assertSosFolder();
         const retry = await send();
         if (excelFileIsOpen(retry.status, retry.responseText)) throw fileLockError(name);
+        if (isAccessDenied(retry.status, retry.responseText)) throw accessDeniedError(name);
         if (retry.status >= 200 && retry.status < 300) {
           lastError = "";
           fileOk = true;
@@ -1656,6 +1676,40 @@
           background: #111111; color: #ffffff; border: 1px solid #111111;
         }
         #excelockRetry:disabled { opacity: .55; cursor: default; }
+        .accessdeny {
+          display: none; position: absolute; inset: 0; z-index: 70;
+          align-items: center; justify-content: center; padding: 12px;
+          background: #7f1d1d;
+        }
+        .accessdeny.open { display: flex; }
+        .accessdeny-card {
+          width: min(760px, 100%);
+          max-height: 100%;
+          overflow: auto;
+          display: flex; flex-direction: column; gap: 12px;
+          padding: 18px; background: #ffffff; color: #111111;
+          border: 6px solid #111111; border-radius: 16px;
+        }
+        .accessdeny-stop {
+          font-size: 56px; font-weight: 900; letter-spacing: .08em; line-height: 1;
+          background: #b42318; color: #ffffff; text-align: center; padding: 10px 12px;
+        }
+        .accessdeny-title { font-size: 30px; font-weight: 900; line-height: 1.15; text-align: center; }
+        .accessdeny-file {
+          font: 800 20px/1.35 Consolas, "Courier New", monospace;
+          word-break: break-all;
+          border: 4px solid #b42318; background: #fff4f4; padding: 10px 12px;
+        }
+        .accessdeny-steps { margin: 0; padding-left: 32px; }
+        .accessdeny-steps li { font-size: 22px; font-weight: 800; line-height: 1.3; margin: 8px 0; }
+        #accessMsg { font-size: 18px; font-weight: 800; line-height: 1.35; }
+        #accessOpen, #accessRetry {
+          height: 68px; font-size: 26px; font-weight: 900; letter-spacing: .04em;
+          border: 4px solid #111111; cursor: pointer;
+        }
+        #accessOpen { background: #f5c518; color: #111111; }
+        #accessRetry { background: #111111; color: #ffffff; }
+        #accessOpen:disabled, #accessRetry:disabled { opacity: .55; cursor: default; }
         .fab {
           display: none; position: absolute; right: 18px; bottom: 18px; z-index: 2;
           pointer-events: auto;
@@ -1684,40 +1738,40 @@
               <div class="lamp" id="lampSp" title="SharePoint"><span class="dot"></span>SP</div>
             </div>
             <div class="counts" id="counts"></div>
-            <div class="clock" id="clock">00:00:00</div>
+                <div class="clock" id="clock">00:00:00</div>
             <button id="debug" title="Copy debug JSON">Debug</button>
-            <button class="x" id="close" title="Close">×</button>
-          </div>
+              <button class="x" id="close" title="Close">×</button>
+            </div>
           <div class="scanrow">
             <select id="location" title="Location"></select>
             <button id="delLoc" type="button" disabled title="Remove this custom location">Delete</button>
             <input id="q" type="text" placeholder="Scan container" autocomplete="off" spellcheck="false" />
-          </div>
-          <div class="ageboard" id="ageBoard">
+            </div>
+            <div class="ageboard" id="ageBoard">
             <div class="age-kicker" id="ageKicker">AGE</div>
             <div class="age-val" id="ageVal">Scan</div>
-            <div class="age-tag" id="ageTag">—</div>
-          </div>
+                <div class="age-tag" id="ageTag">—</div>
+              </div>
           <div class="split">
-            <div class="ticket">
+          <div class="ticket">
               <div class="identity" id="identity"><span class="empty">No container yet</span></div>
               <div class="lineswrap">
-                <table>
-                  <thead><tr><th>Age</th><th>FcSku</th><th>Qty</th><th>Owner</th><th>Disposition</th></tr></thead>
+            <table>
+              <thead><tr><th>Age</th><th>FcSku</th><th>Qty</th><th>Owner</th><th>Disposition</th></tr></thead>
                   <tbody id="lines"><tr><td colspan="5" class="empty">No lines</td></tr></tbody>
-                </table>
+            </table>
               </div>
-            </div>
-            <div class="history">
+          </div>
+          <div class="history">
               <div class="histhead">
                 <span>HISTORY</span>
                 <input id="filter" placeholder="Filter" />
               </div>
-              <div class="histwrap">
-                <table>
+            <div class="histwrap">
+              <table>
                   <thead><tr><th>Time</th><th>Container</th><th>Age</th><th>St</th></tr></thead>
-                  <tbody id="hist"></tbody>
-                </table>
+                <tbody id="hist"></tbody>
+              </table>
               </div>
             </div>
           </div>
@@ -1737,6 +1791,21 @@
               <div class="excelock-file" id="excelockFile"></div>
               <div class="excelock-msg" id="excelockMsg">Close that file in Excel, then press RETRY.</div>
               <button id="excelockRetry" type="button">RETRY</button>
+            </div>
+          </div>
+          <div class="accessdeny" id="accessdeny">
+            <div class="accessdeny-card">
+              <div class="accessdeny-stop">STOP</div>
+              <div class="accessdeny-title" id="accessTitle">YOUR SCANS WERE NOT SAVED</div>
+              <div class="accessdeny-file" id="accessFile"></div>
+              <ol class="accessdeny-steps">
+                <li>Click the yellow button. It opens the SharePoint folder.</li>
+                <li>Wait until that page finishes loading. Leave it open.</li>
+                <li>Come back to this page and press RETRY.</li>
+              </ol>
+              <div id="accessMsg">This box stays here until the save works. RETRY is the only way to close it.</div>
+              <button id="accessOpen" type="button">OPEN THE FOLDER</button>
+              <button id="accessRetry" type="button">RETRY</button>
             </div>
           </div>
           <div class="locprompt" id="locprompt">
@@ -1780,7 +1849,7 @@
     }
 
     function focusScanBox() {
-      if (!open || excelLockOpen || anotherFieldHasFocus()) return;
+      if (!open || excelLockOpen || accessDeniedOpen || anotherFieldHasFocus()) return;
       input.focus();
     }
     const scanQueue = [];
@@ -1788,6 +1857,7 @@
     let working = false;
     let excelLockOpen = false;
     let excelLockRetrying = false;
+    let accessDeniedOpen = false;
     let open = true;
     let alias = "";
     let spOk = false;
@@ -1800,6 +1870,7 @@
 
     function showExcelLock(fileName, stillOpen) {
       const file = fileName || sosCache.name || "today's workbook";
+      hideAccessDenied();
       excelLockOpen = true;
       setOpen(true);
       shadow.getElementById("excelockFile").textContent = file;
@@ -1811,6 +1882,43 @@
       button.disabled = false;
       button.focus();
       setBanner("error", `<strong>Close Excel.</strong> ${escapeHtml(file)}`);
+    }
+
+    function showAccessDenied(stillBlocked) {
+      const who = alias || sosCache.alias || "you";
+      const file = sosCache.name || (who === "you" ? "today's workbook" : fileNameFor(who));
+      accessDeniedOpen = true;
+      hideExcelLock();
+      setOpen(true);
+      shadow.getElementById("accessTitle").textContent = stillBlocked
+        ? "STILL BLOCKED. THE FILE WAS NOT CREATED."
+        : heldSaves.length
+          ? "YOUR SCANS WERE NOT SAVED"
+          : "YOU CANNOT SAVE YET";
+      shadow.getElementById("accessFile").textContent = `${who}  ·  ${file}`;
+      shadow.getElementById("accessMsg").textContent = stillBlocked
+        ? "SharePoint blocked you again. Click OPEN THE FOLDER, wait for that page to load, then press RETRY."
+        : "SharePoint blocked you. No file was created. This box stays here until the save works. RETRY is the only way to close it.";
+      shadow.getElementById("accessdeny").classList.add("open");
+      const button = shadow.getElementById("accessRetry");
+      button.disabled = false;
+      shadow.getElementById("accessOpen").disabled = false;
+      button.focus();
+      setBanner("error", `<strong>STOP.</strong> Open the SharePoint folder, then press RETRY.`);
+    }
+
+    function hideAccessDenied() {
+      accessDeniedOpen = false;
+      shadow.getElementById("accessdeny").classList.remove("open");
+      shadow.getElementById("accessRetry").disabled = false;
+      shadow.getElementById("accessOpen").disabled = false;
+    }
+
+    function holdAccessDenied(err) {
+      if (Array.isArray(err?.rows) && err.rows.length) {
+        heldSaves.push({ rows: err.rows, alias: err.alias, location: err.location });
+      }
+      showAccessDenied(accessDeniedOpen);
     }
 
     function hideExcelLock() {
@@ -1832,23 +1940,70 @@
       showExcelLock(err?.fileName || sosCache.name, false);
     }
 
+    async function retryFolderAccess() {
+      const who = alias || (await currentAlias());
+      alias = who;
+      shadow.getElementById("opTitle").textContent = who;
+      await assertSosFolder();
+      await ensureSosCache(who);
+      if (sosCache.book && sosCache.name) {
+        await writeSosFile(sosCache.name, workbookBytes(sosCache.book));
+      }
+      spOk = true;
+      fileOk = true;
+      lastError = "";
+    }
+
     function retryHeldSaves() {
       if (excelLockRetrying) return;
       const jobs = heldSaves.splice(0, heldSaves.length);
-      if (!jobs.length) return;
       excelLockRetrying = true;
       shadow.getElementById("excelockRetry").disabled = true;
-      enqueueSave(async () => {
-        for (let i = 0; i < jobs.length; i++) {
-          try {
-            await appendSosRows(jobs[i].rows, jobs[i].alias, jobs[i].location);
-          } catch (err) {
-            err.remaining = jobs.slice(i);
-            throw err;
-          }
+      shadow.getElementById("accessRetry").disabled = true;
+      const finishFail = (err) => {
+        excelLockRetrying = false;
+        shadow.getElementById("excelockRetry").disabled = false;
+        shadow.getElementById("accessRetry").disabled = false;
+        if (err?.code === "ACCESS_DENIED" || isAccessDenied(0, err?.message)) {
+          showAccessDenied(true);
+          return;
         }
-      })
+        if (err?.code === "FILE_LOCK") {
+          showExcelLock(err.fileName || sosCache.name, true);
+          return;
+        }
+        showExcelLock(err?.fileName || sosCache.name, true);
+        shadow.getElementById("excelockMsg").textContent =
+          `${err?.message || "Save failed."} Close the file, then press RETRY.`;
+        shadow.getElementById("excelockRetry").focus();
+      };
+      const run = jobs.length
+        ? enqueueSave(async () => {
+            for (let i = 0; i < jobs.length; i++) {
+              try {
+                await appendSosRows(jobs[i].rows, jobs[i].alias, jobs[i].location);
+              } catch (err) {
+                err.remaining = jobs.slice(i);
+                throw err;
+              }
+            }
+          })
+        : retryFolderAccess();
+      Promise.resolve(run)
         .then(() => {
+          hideExcelLock();
+          hideAccessDenied();
+          excelLockRetrying = false;
+          shadow.getElementById("excelockRetry").disabled = false;
+          shadow.getElementById("accessRetry").disabled = false;
+          fileOk = true;
+          lastError = "";
+          tick();
+          if (!jobs.length) {
+            setBanner("ready", `Saved. ${escapeHtml(sosCache.name || "The file")} is in the folder.`);
+            focusScanBox();
+            return;
+          }
           const ids = [];
           for (const job of jobs) {
             for (const row of job.rows) {
@@ -1856,27 +2011,13 @@
               if (id && !ids.includes(id)) ids.push(id);
             }
           }
-          hideExcelLock();
-          fileOk = true;
-          lastError = "";
-          tick();
           setBanner("found", `<strong>SAVED</strong> ${ids.map((id) => escapeHtml(id)).join(", ")}`);
           focusScanBox();
         })
         .catch((err) => {
-          excelLockRetrying = false;
           const rest = Array.isArray(err?.remaining) ? err.remaining : jobs;
-          heldSaves.unshift(...rest);
-          const button = shadow.getElementById("excelockRetry");
-          button.disabled = false;
-          if (err?.code === "FILE_LOCK") {
-            showExcelLock(err.fileName || sosCache.name, true);
-            return;
-          }
-          showExcelLock(err?.fileName || sosCache.name, true);
-          shadow.getElementById("excelockMsg").textContent =
-            `${err?.message || "Save failed."} Close the file, then press RETRY.`;
-          button.focus();
+          if (rest.length) heldSaves.unshift(...rest);
+          finishFail(err);
         });
     }
 
@@ -2040,7 +2181,7 @@
     }
 
     function setOpen(on) {
-      if (!on && excelLockOpen) return;
+      if (!on && (excelLockOpen || accessDeniedOpen)) return;
       open = on;
       hostEl.classList.toggle("closed", !on);
       document.documentElement.style.overflow = "";
@@ -2211,6 +2352,10 @@
     shadow.getElementById("locpromptCancel").addEventListener("click", () => cancelPausedScans());
 
     shadow.getElementById("excelockRetry").addEventListener("click", () => retryHeldSaves());
+    shadow.getElementById("accessRetry").addEventListener("click", () => retryHeldSaves());
+    shadow.getElementById("accessOpen").addEventListener("click", () => {
+      GM_openInTab(SHARE_FOLDER_URL, { active: true, insert: true });
+    });
     const debugPanel = shadow.getElementById("dbg");
     const debugText = shadow.getElementById("dbgText");
 
@@ -2394,6 +2539,15 @@
               holdLockedSave(err);
               return;
             }
+            if (err?.code === "ACCESS_DENIED" || isAccessDenied(0, err?.message)) {
+              if (!err.rows) {
+                err.rows = rows;
+                err.alias = who;
+                err.location = location;
+              }
+              holdAccessDenied(err);
+              return;
+            }
             if (working || !idsMatch(selectedId, id)) return;
             setBanner("error", `<strong>Lookup shown, save failed.</strong> ${escapeHtml(err.message || err)}`);
           });
@@ -2424,7 +2578,7 @@
 
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
-        e.preventDefault();
+      e.preventDefault();
         run();
       }
     });
@@ -2432,7 +2586,7 @@
       "keydown",
       (e) => {
         if (!open) return;
-        if (excelLockOpen) {
+        if (excelLockOpen || accessDeniedOpen) {
           e.preventDefault();
           e.stopPropagation();
           if (e.key === "Enter") retryHeldSaves();
@@ -2502,6 +2656,10 @@
         spOk = false;
         fileOk = false;
         tick();
+        if (err?.code === "ACCESS_DENIED" || isAccessDenied(0, err?.message)) {
+          showAccessDenied(false);
+          return;
+        }
         setBanner(
           "error",
           `SharePoint save path failed. Open the Line Flush Records folder once, allow amazon-my.sharepoint.com, then refresh. ${escapeHtml(err.message || err)}`
@@ -2509,7 +2667,7 @@
       });
 
     try {
-      GM_registerMenuCommand("Open Line Flush Records", () => GM_openInTab(SOS_FOLDER_URL, true));
+      GM_registerMenuCommand("Open Line Flush Records", () => GM_openInTab(SHARE_FOLDER_URL, true));
       GM_registerMenuCommand("Open Peculiar", () => GM_openInTab(PECULIAR_URL, true));
       GM_registerMenuCommand("Copy Debug", () => copyDebugText().catch(() => {}));
     } catch {
@@ -2583,7 +2741,7 @@
     document.getElementById("plf-old-script")?.remove();
     if (!lineFlushStarted) {
       lineFlushStarted = true;
-      startPeculiarWorker();
+    startPeculiarWorker();
     }
     if (!document.getElementById("plf-scan-host")) startScanner();
   }
@@ -2617,65 +2775,57 @@
         .wrap {
           position: fixed; inset: 0; z-index: 1;
           display: flex; align-items: center; justify-content: center;
-          padding: 16px 16px 92px; background: rgba(0,0,0,.55);
+          padding: 16px 16px 110px; background: rgba(127,29,29,.92);
         }
         .card {
-          width: min(520px, 100%);
-          max-height: calc(100vh - 110px);
+          width: min(760px, 100%);
+          max-height: calc(100vh - 130px);
           overflow: auto;
           background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 14px;
           padding: 18px 18px 16px;
           display: flex; flex-direction: column; gap: 12px;
         }
-        .attn { font-size: 28px; font-weight: 900; letter-spacing: .04em; }
-        .lead { font-size: 16px; font-weight: 700; margin: 0; }
-        .box { border: 2px solid #111111; border-radius: 10px; padding: 10px 12px; }
-        .kicker { font-size: 12px; font-weight: 800; letter-spacing: .08em; }
-        .name { font-size: 22px; font-weight: 900; line-height: 1.2; }
-        .ver { font-size: 16px; font-weight: 800; }
+        .attn { font-size: 64px; font-weight: 900; letter-spacing: .08em; line-height: 1; text-align: center; background: #b42318; color: #ffffff; padding: 12px; }
+        .lead { font-size: 28px; font-weight: 900; line-height: 1.2; margin: 0; text-align: center; }
+        .box { border: 4px solid #111111; border-radius: 10px; padding: 12px; }
+        .kicker { font-size: 16px; font-weight: 900; letter-spacing: .08em; }
+        .name { font-size: 32px; font-weight: 900; line-height: 1.15; }
         .old { border-color: #b42318; background: #fdeceb; color: #b42318; }
-        .steps { margin: 0; padding-left: 20px; font-size: 15px; font-weight: 700; }
-        .steps li { margin: 4px 0; }
-        .reload {
-          height: 42px; border: 1px solid #111111; border-radius: 8px;
-          background: #ffffff; color: #111111; font-size: 16px; font-weight: 800;
-          cursor: pointer;
-        }
+        .steps { margin: 0; padding-left: 34px; }
+        .steps li { margin: 10px 0; font-size: 24px; font-weight: 900; line-height: 1.25; }
         .try {
           position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 2;
-          height: 56px; border: 2px solid #111111; border-radius: 10px;
+          height: 72px; border: 4px solid #111111; border-radius: 12px;
           background: #111111; color: #ffffff;
-          font-size: 18px; font-weight: 900; letter-spacing: .02em;
+          font-size: 24px; font-weight: 900; letter-spacing: .02em;
           cursor: pointer;
           box-shadow: 0 8px 24px rgba(0,0,0,.35);
         }
       </style>
       <div class="wrap">
         <div class="card">
-          <div class="attn">⚠️ ATTENTION</div>
-          <p class="lead">You are trying to use:</p>
-          <div class="box">
-            <div class="kicker">THIS SCRIPT</div>
-            <div class="name">${escapeHtml(SCRIPT_NAME)}</div>
-            <div class="ver">${escapeHtml(VERSION)}</div>
-          </div>
-          <p class="lead">These are not the same tool. This one cannot run while any version of the older scan panel is on:</p>
+          <div class="attn">STOP</div>
+          <p class="lead">Turn the old script OFF before you scan.</p>
           <div class="box old">
-            <div class="kicker">OLDER SCRIPT — TURN OFF EVERY VERSION</div>
-            ${oldScriptLines().map((line) => `<div class="name">${escapeHtml(line)}</div>`).join("")}
+            <div class="kicker">TURN THIS ONE OFF</div>
+            <div class="name">${escapeHtml(OLD_SCRIPT_NAME)}</div>
+            ${oldScriptLines().filter((line) => line.toLowerCase() !== OLD_SCRIPT_NAME.toLowerCase()).map((line) => `<div class="name">${escapeHtml(line)}</div>`).join("")}
+          </div>
+          <div class="box">
+            <div class="kicker">LEAVE THIS ONE ON</div>
+            <div class="name">${escapeHtml(SCRIPT_NAME)}</div>
+            <div class="name">${escapeHtml(VERSION)}</div>
           </div>
           <ol class="steps">
-            <li>Click the Tampermonkey icon.</li>
-            <li>Turn off every version of the red script above.</li>
-            <li>Refresh the page. This warning comes back if any older scan panel is still on.</li>
-            <li>Press the button at the bottom of the screen.</li>
+            <li>Click the Tampermonkey icon. It is the puzzle piece at the top of Firefox.</li>
+            <li>Find the red name above. Click its switch so it turns OFF.</li>
+            <li>Leave Peculiar Line Flush ON.</li>
+            <li>Click the black button at the bottom of this screen.</li>
           </ol>
-          <button class="reload" id="reload" type="button">Refresh page</button>
         </div>
       </div>
-      <button class="try" id="tryAgain" type="button">Try again for Peculiar Line Flush</button>`;
-    shadow.getElementById("reload").addEventListener("click", () => location.reload());
+      <button class="try" id="tryAgain" type="button">I TURNED THE OLD SCRIPT OFF</button>`;
     shadow.getElementById("tryAgain").addEventListener("click", () => tryLineFlushAgain());
     document.documentElement.append(host);
   }
