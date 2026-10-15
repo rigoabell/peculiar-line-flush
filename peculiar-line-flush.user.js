@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.11
+// @version      2.9.12
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.11";
+  const VERSION = "2.9.12";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1680,27 +1680,15 @@
         }
         .foot b { color: #111111; }
         #footMsg { flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
-        .toast {
-          display: none;
-          position: fixed; z-index: 35;
-          top: 12px; left: 50%; transform: translateX(-50%);
-          width: max-content; min-width: min(280px, calc(100vw - 24px));
-          max-width: calc(100vw - 24px); max-height: calc(100vh - 24px);
-          overflow: auto; pointer-events: auto;
+        .status {
+          margin: 8px 10px 0; padding: 10px 12px;
+          border: 2px solid #111111; border-radius: 8px;
           background: #ffffff; color: #111111;
-          border: 3px solid #111111; border-radius: 12px;
-          box-shadow: 0 16px 40px rgba(0,0,0,.28);
-          padding: 14px;
+          font-size: 16px; font-weight: 800; line-height: 1.35;
+          overflow-wrap: anywhere;
         }
-        .toast.open { display: block; }
-        .toast.found { background: #e8f6ec; border-color: #0b6b2f; }
-        .toast.missing, .toast.error { background: #fff4f4; border-color: #b42318; }
-        .toast-msg { font-size: 18px; font-weight: 800; line-height: 1.35; overflow-wrap: anywhere; }
-        #toastClose {
-          display: block; margin-top: 10px; height: 42px; width: 100%;
-          font-size: 16px; font-weight: 800; cursor: pointer;
-          background: #111111; color: #ffffff; border: 2px solid #111111; border-radius: 8px;
-        }
+        .status.found { background: #e8f6ec; border-color: #0b6b2f; }
+        .status.missing, .status.error { background: #fff4f4; border-color: #b42318; }
         .locprompt, .dbg, .sharebox, .excelock, .accessdeny {
           display: none;
           position: fixed;
@@ -1849,6 +1837,7 @@
             <button id="delLoc" type="button" disabled title="Remove this custom location">Delete</button>
             <input id="q" type="text" placeholder="Scan container" autocomplete="off" spellcheck="false" />
             </div>
+          <div class="status ready" id="note">Ready</div>
             <div class="ageboard" id="ageBoard">
             <div class="age-kicker" id="ageKicker">AGE</div>
             <div class="age-val" id="ageVal">Scan</div>
@@ -1881,10 +1870,6 @@
             <span id="footMsg">File saves on the first scan. Keep it closed in Excel.</span>
           </div>
         </div>
-      </div>
-      <div class="toast" id="toast">
-        <div class="toast-msg" id="note"></div>
-        <button id="toastClose" type="button">Close</button>
       </div>
       <div class="dbg" id="dbg">
         <div class="dbg-card">
@@ -2020,9 +2005,7 @@
     let selectedId = "";
 
     function setBanner(kind, html) {
-      const toast = shadow.getElementById("toast");
-      toast.className = "toast open " + (kind || "info");
-      note.className = "toast-msg";
+      note.className = "status " + (kind || "info");
       note.innerHTML = html;
     }
 
@@ -2567,10 +2550,6 @@
       });
     });
     shadow.getElementById("shareClose").addEventListener("click", () => closeShare());
-    shadow.getElementById("toastClose").addEventListener("click", () => {
-      shadow.getElementById("toast").classList.remove("open");
-      focusScanBox();
-    });
 
     function closeDebug() {
       debugPanel.classList.remove("open");
@@ -2825,10 +2804,6 @@
         }
         if (debugPanel.classList.contains("open")) {
           closeDebug();
-          return;
-        }
-        if (shadow.getElementById("toast").classList.contains("open")) {
-          shadow.getElementById("toast").classList.remove("open");
           return;
         }
         setOpen(false);
