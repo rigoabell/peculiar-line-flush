@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.16
+// @version      2.9.17
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.16";
+  const VERSION = "2.9.17";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -531,9 +531,7 @@
   function releasePageButton(doc) {
     const active = doc?.activeElement;
     if (!(active instanceof HTMLElement) || active === document.body) return;
-    const searchControl =
-      active.id === "searchContainerInput" || Boolean(active.closest?.("#searchContainerButton"));
-    if (searchControl || active.tagName === "BUTTON") active.blur();
+    if (active.id === "searchContainerInput" || active.closest?.("#searchContainerButton")) active.blur();
   }
 
   function submitPeculiarSearch(containerId) {
@@ -572,7 +570,6 @@
       const finish = (result) => {
         if (finished) return;
         finished = true;
-        obs.disconnect();
         clearInterval(poll);
         clearTimeout(timer);
         resolve(result);
@@ -598,13 +595,7 @@
           }
         }
       };
-      const obs = new MutationObserver(check);
-      for (const doc of docsToSearch()) {
-        if (doc.documentElement) {
-          obs.observe(doc.documentElement, { childList: true, subtree: true, characterData: true });
-        }
-      }
-      const poll = setInterval(check, 40);
+      const poll = setInterval(check, 80);
       const timer = setTimeout(() => {
         const last = scrapePopoverFor(containerId);
         finish(last.ok ? last : { ok: false, error: "TIMEOUT", raw: last.raw || "" });
@@ -1462,7 +1453,12 @@
   function loadHistory(alias) {
     const pack = GM_getValue(KEYS.history, null);
     if (!pack || pack.day !== dayStamp() || pack.alias !== alias || !Array.isArray(pack.rows)) return [];
-    return pack.rows;
+    return pack.rows.map((row) => {
+      if (!row?.result?.raw) return row;
+      const result = { ...row.result };
+      delete result.raw;
+      return { ...row, result };
+    });
   }
 
   function saveHistory(alias, rows) {
@@ -1999,6 +1995,7 @@
       if (shadow.getElementById("sharebox")?.classList.contains("open")) return;
       if (shadow.getElementById("dbg")?.classList.contains("open")) return;
       releasePageButton(document);
+      if (shadow.activeElement === input) return;
       input.focus({ preventScroll: true });
     }
     restoreScanFocus = focusScanBox;
@@ -2279,7 +2276,9 @@
 
     function renderHistory() {
       const q = cellText(shadow.getElementById("filter").value).toLowerCase();
-      const rows = recent.filter((r) => !q || `${r.id} ${r.sku} ${r.age}`.toLowerCase().includes(q));
+      const rows = recent
+        .filter((r) => !q || `${r.id} ${r.sku} ${r.age}`.toLowerCase().includes(q))
+        .slice(0, 60);
       shadow.getElementById("hist").innerHTML = rows.length
         ? rows
             .map((r) => {
@@ -2709,6 +2708,8 @@
         alias = who;
         const sku = result.inventory?.[0]?.fcSku || "";
         const status = result.ok ? "OK" : result.error === "NOT_FOUND" ? "NOT FOUND" : result.error || "ERROR";
+        const stored = { ...result };
+        delete stored.raw;
         selectedId = id;
         recent.unshift({
           t: nowIso(),
@@ -2716,7 +2717,7 @@
           age: result.oldestAge || "",
           sku,
           status,
-          result,
+          result: stored,
         });
         persist();
         showTicket(id, result);
@@ -2850,7 +2851,6 @@
       input.focus({ preventScroll: true });
       input.value += ch;
     };
-    document.addEventListener("focusin", focusScanBox, true);
 
     renderStats();
     tick();
@@ -2949,12 +2949,7 @@
   }
 
   function otherScanPanelOn() {
-    if (OTHER_SCAN_PANEL_IDS.some((id) => document.getElementById(id))) return true;
-    if (document.querySelector("[id*='scan-panel'], [id*='ScanPanel'], [id*='scanpanel'], [data-role='scan-input']")) return true;
-    for (const el of document.querySelectorAll(".tm-title")) {
-      if (/scan panel/i.test(el.textContent || "")) return true;
-    }
-    return false;
+    return OTHER_SCAN_PANEL_IDS.some((id) => document.getElementById(id));
   }
 
   let lineFlushStarted = false;
@@ -3257,20 +3252,11 @@
 
   if (isPeculiar) {
     let armed = false;
-    let bootTimer = 0;
     const tryBoot = () => {
       if (!document.documentElement) return;
       if (!frameShouldRun()) return;
       if (!armed) {
         armed = true;
-        const watchOtherPanel = new MutationObserver(() => {
-          if (bootTimer) return;
-          bootTimer = setTimeout(() => {
-            bootTimer = 0;
-            bootLineFlush();
-          }, 200);
-        });
-        watchOtherPanel.observe(document.documentElement, { childList: true, subtree: true });
         checkForScriptUpdate();
         setInterval(checkForScriptUpdate, 2 * 60 * 1000);
         document.addEventListener("visibilitychange", () => {
