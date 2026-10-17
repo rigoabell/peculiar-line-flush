@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.17
+// @version      2.9.18
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.17";
+  const VERSION = "2.9.18";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1465,12 +1465,58 @@
     GM_setValue(KEYS.history, { day: dayStamp(), alias, rows: rows.slice(0, 400), t: Date.now() });
   }
 
+  function uiPixelRatio() {
+    const ratio = Number(pageWindow.devicePixelRatio || window.devicePixelRatio || 1);
+    return ratio > 0 ? ratio : 1;
+  }
+
+  // Lay the panel out in device pixels, then scale it back onto the window.
+  // Windows 150% with Firefox at 100% zoom then matches a 100% screen.
+  function paintPanelScale(el) {
+    if (!el) return;
+    const ratio = uiPixelRatio();
+    const width = pageWindow.innerWidth * ratio;
+    const height = pageWindow.innerHeight * ratio;
+    el.style.setProperty("--plf-dpr", String(ratio));
+    el.style.setProperty("--plf-vw", `${width}px`);
+    el.style.setProperty("--plf-vh", `${height}px`);
+    el.style.setProperty("--plf-fit", Math.abs(ratio - 1) < 0.02 ? "none" : `scale(${1 / ratio})`);
+  }
+
+  function syncPanelScale() {
+    ["plf-scan-host", "plf-old-script", "plf-update", "plf-boot-error"].forEach((id) => {
+      paintPanelScale(document.getElementById(id));
+    });
+  }
+
+  function watchPanelScale() {
+    if (watchPanelScale.armed) return;
+    watchPanelScale.armed = true;
+    const refresh = () => syncPanelScale();
+    pageWindow.addEventListener("resize", refresh);
+    if (pageWindow.visualViewport) pageWindow.visualViewport.addEventListener("resize", refresh);
+    let media = null;
+    const onMedia = () => {
+      syncPanelScale();
+      armMedia();
+    };
+    const armMedia = () => {
+      if (media) media.removeEventListener("change", onMedia);
+      media = pageWindow.matchMedia(`(resolution: ${uiPixelRatio()}dppx)`);
+      media.addEventListener("change", onMedia);
+    };
+    armMedia();
+  }
+
   async function copyDebugText() {
     const payload = {
       version: VERSION,
       at: nowIso(),
       href: location.href,
       userAgent: navigator.userAgent,
+      devicePixelRatio: uiPixelRatio(),
+      innerWidth: pageWindow.innerWidth,
+      innerHeight: pageWindow.innerHeight,
       host,
       lastError,
       lastDebug,
@@ -1513,7 +1559,9 @@
     hostEl.style.setProperty("inset", "0", "important");
     hostEl.style.setProperty("z-index", "2147483646", "important");
     hostEl.style.setProperty("pointer-events", "none", "important");
+    hostEl.style.setProperty("overflow", "hidden", "important");
     hostEl.style.setProperty("font-family", "Segoe UI, system-ui, sans-serif", "important");
+    paintPanelScale(hostEl);
     const shadow = hostEl.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
@@ -1524,6 +1572,18 @@
           z-index: 2147483646 !important;
           display: block !important;
           pointer-events: none !important;
+          overflow: hidden !important;
+          --plf-dpr: 1;
+          --plf-vw: 100vw;
+          --plf-vh: 100vh;
+        }
+        .plf-stage {
+          position: absolute; left: 0; top: 0;
+          width: var(--plf-vw); height: var(--plf-vh);
+          transform: var(--plf-fit, none);
+          transform-origin: 0 0;
+          pointer-events: none;
+          container: plf / inline-size;
         }
         * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
         .wrap {
@@ -1535,8 +1595,8 @@
         .modal {
           position: relative; z-index: 1;
           pointer-events: auto;
-          width: min(860px, calc(100vw - 16px));
-          max-height: calc(100vh - 16px);
+          width: min(860px, calc(var(--plf-vw) - 16px));
+          max-height: calc(var(--plf-vh) - 16px);
           display: flex; flex-direction: column;
           background: #ffffff; color: #111111; color-scheme: light;
           border: 1px solid #d8dee8; border-radius: 12px;
@@ -1604,7 +1664,7 @@
           padding: 8px 10px 0; background: #ffffff;
         }
         #location {
-          flex: 0 0 2.6in; width: 2.6in; max-width: 42vw; height: 38px;
+          flex: 0 0 2.6in; width: 2.6in; max-width: calc(var(--plf-vw) * 0.42); height: 38px;
           border: 1px solid #111111; border-radius: 8px;
           background: #ffffff; color: #111111; font-size: 14px; font-weight: 700; padding: 0 8px;
         }
@@ -1659,7 +1719,7 @@
           background: #ffffff; color: #111111;
           border: 2px solid #111111; border-radius: 8px;
         }
-        .lineswrap, .histwrap { min-height: 0; overflow: auto; max-height: min(240px, calc(100vh - 230px)); }
+        .lineswrap, .histwrap { min-height: 0; overflow: auto; max-height: min(240px, calc(var(--plf-vh) - 230px)); }
         .histhead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
         .histhead span { font-size: 11px; letter-spacing: .12em; font-weight: 700; color: #111111; }
         #filter {
@@ -1699,19 +1759,19 @@
           display: none;
           position: fixed;
           left: 50%; top: 50%; transform: translate(-50%, -50%);
-          max-width: calc(100vw - 24px); max-height: calc(100vh - 24px);
+          max-width: calc(var(--plf-vw) - 24px); max-height: calc(var(--plf-vh) - 24px);
           height: auto; overflow: auto; pointer-events: auto;
         }
         .locprompt.open, .dbg.open, .sharebox.open, .excelock.open, .accessdeny.open { display: block; }
-        .locprompt, .sharebox, .excelock { z-index: 40; width: min(640px, calc(100vw - 24px)); }
+        .locprompt, .sharebox, .excelock { z-index: 40; width: min(640px, calc(var(--plf-vw) - 24px)); }
         .howto { margin: 0; padding-left: 28px; }
         .howto li { font-size: 18px; font-weight: 800; line-height: 1.35; margin: 8px 0; }
         .sharebox { z-index: 41; }
-        .dbg { z-index: 50; width: min(640px, calc(100vw - 24px)); }
+        .dbg { z-index: 50; width: min(640px, calc(var(--plf-vw) - 24px)); }
         .excelock { z-index: 60; }
-        .accessdeny { z-index: 70; width: min(720px, calc(100vw - 24px)); }
+        .accessdeny { z-index: 70; width: min(720px, calc(var(--plf-vw) - 24px)); }
         .locprompt-card {
-          width: min(640px, calc(100vw - 24px));
+          width: min(640px, calc(var(--plf-vw) - 24px));
           display: flex; flex-direction: column; gap: 8px;
           padding: 14px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1719,12 +1779,12 @@
         }
         .locprompt-title { font-size: 16px; font-weight: 800; }
         .locprompt-for { font-size: 13px; font-weight: 700; word-break: break-word; }
-        .locprompt-list { display: grid; gap: 6px; overflow: auto; max-height: min(280px, 46vh); }
+        .locprompt-list { display: grid; gap: 6px; overflow: auto; max-height: min(280px, calc(var(--plf-vh) * 0.46)); }
         .locprompt-list button, .locprompt-actions button { text-align: left; }
         .locprompt-actions { display: flex; gap: 8px; }
         .locprompt-actions button { flex: 1; text-align: center; }
         .dbg-card {
-          width: min(640px, calc(100vw - 24px));
+          width: min(640px, calc(var(--plf-vw) - 24px));
           display: flex; flex-direction: column; gap: 8px;
           padding: 14px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1732,14 +1792,14 @@
         }
         .dbg-title { font-size: 16px; font-weight: 800; }
         #dbgText {
-          width: 100%; min-height: 160px; max-height: min(360px, calc(100vh - 220px)); resize: vertical;
+          width: 100%; min-height: 160px; max-height: min(360px, calc(var(--plf-vh) - 220px)); resize: vertical;
           border: 1px solid #111111; border-radius: 8px; padding: 8px;
           background: #ffffff; color: #111111;
           font: 12px/1.4 Consolas, "Courier New", monospace;
         }
         .dbg-actions { display: flex; gap: 8px; justify-content: flex-end; }
         .sharebox-card {
-          width: min(640px, calc(100vw - 24px));
+          width: min(640px, calc(var(--plf-vw) - 24px));
           display: flex; flex-direction: column; gap: 10px;
           padding: 16px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1760,7 +1820,7 @@
         }
         #shareClose { height: 40px; font-weight: 800; }
         .excelock-card {
-          width: min(640px, calc(100vw - 24px));
+          width: min(640px, calc(var(--plf-vw) - 24px));
           display: flex; flex-direction: column; gap: 10px;
           padding: 16px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1779,7 +1839,7 @@
         }
         #excelockRetry:disabled { opacity: .55; cursor: default; }
         .accessdeny-card {
-          width: min(720px, calc(100vw - 24px));
+          width: min(720px, calc(var(--plf-vw) - 24px));
           display: flex; flex-direction: column; gap: 12px;
           padding: 18px; background: #ffffff; color: #111111;
           border: 6px solid #111111; border-radius: 16px;
@@ -1815,13 +1875,14 @@
         :host(.closed) .wrap { display: none; }
         :host(.closed) .fab { display: block; pointer-events: auto !important; }
         :host(.closed) { pointer-events: none !important; }
-        @media (max-width: 720px) {
+        @container plf (max-width: 720px) {
           .split { grid-template-columns: 1fr; }
           .history { border-left: 0; border-top: 1px solid #e4e7ec; }
-          .modal { max-height: calc(100vh - 12px); }
-          .lineswrap, .histwrap { max-height: min(160px, calc(100vh - 280px)); }
+          .modal { max-height: calc(var(--plf-vh) - 12px); }
+          .lineswrap, .histwrap { max-height: min(160px, calc(var(--plf-vh) - 280px)); }
         }
       </style>
+      <div class="plf-stage" id="stage">
       <div class="wrap" id="wrap">
         <div class="backdrop" id="backdrop"></div>
         <div class="modal" id="modal">
@@ -1967,7 +2028,8 @@
           </div>
         </div>
       </div>
-      <button class="fab" id="fab">Line Flush</button>`;
+      <button class="fab" id="fab">Line Flush</button>
+      </div>`;
     document.documentElement.append(hostEl);
 
     const input = shadow.getElementById("q");
@@ -2987,17 +3049,26 @@
       zIndex: "2147483647",
       display: "block",
       pointerEvents: "auto",
+      overflow: "hidden",
     });
+    paintPanelScale(host);
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
-        :host { all: initial; }
+        :host { all: initial; --plf-dpr: 1; --plf-vw: 100vw; --plf-vh: 100vh; }
         * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
+        .plf-stage {
+          position: absolute; left: 0; top: 0;
+          width: var(--plf-vw); height: var(--plf-vh);
+          transform: var(--plf-fit, none);
+          transform-origin: 0 0;
+          pointer-events: auto;
+        }
         .card {
           position: fixed; z-index: 1;
           left: 50%; top: 50%; transform: translate(-50%, -50%);
-          width: min(760px, calc(100vw - 24px));
-          max-height: calc(100vh - 24px);
+          width: min(760px, calc(var(--plf-vw) - 24px));
+          max-height: calc(var(--plf-vh) - 24px);
           overflow: auto;
           background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 14px;
@@ -3020,7 +3091,8 @@
           cursor: pointer;
         }
       </style>
-      <div class="card">
+      <div class="plf-stage">
+        <div class="card">
           <div class="attn">STOP</div>
           <p class="lead">Turn the old script OFF before you scan.</p>
           <div class="box old">
@@ -3042,7 +3114,7 @@
             <li>If this box is still here, the old script is still on. Start again at step 1.</li>
           </ol>
           <button class="try" id="tryAgain" type="button">I TURNED THE OLD SCRIPT OFF</button>
-        </div>`;
+        </div></div>`;
     shadow.getElementById("tryAgain").addEventListener("click", () => tryLineFlushAgain());
     document.documentElement.append(host);
   }
@@ -3089,16 +3161,25 @@
     host.style.setProperty("z-index", "2147483647", "important");
     host.style.setProperty("display", "block", "important");
     host.style.setProperty("pointer-events", "auto", "important");
+    host.style.setProperty("overflow", "hidden", "important");
+    paintPanelScale(host);
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
-        :host { all: initial; }
+        :host { all: initial; --plf-dpr: 1; --plf-vw: 100vw; --plf-vh: 100vh; }
         * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
+        .plf-stage {
+          position: absolute; left: 0; top: 0;
+          width: var(--plf-vw); height: var(--plf-vh);
+          transform: var(--plf-fit, none);
+          transform-origin: 0 0;
+          pointer-events: auto;
+        }
         .card {
           position: fixed; z-index: 1;
           left: 50%; top: 50%; transform: translate(-50%, -50%);
-          width: min(640px, calc(100vw - 24px));
-          max-height: calc(100vh - 24px);
+          width: min(640px, calc(var(--plf-vw) - 24px));
+          max-height: calc(var(--plf-vh) - 24px);
           overflow: auto;
           background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 14px;
@@ -3121,7 +3202,8 @@
           font-size: 18px; font-weight: 900; cursor: pointer;
         }
       </style>
-      <div class="card">
+      <div class="plf-stage">
+        <div class="card">
           <div class="attn">⚠️ NEW VERSION</div>
           <p class="lead">${escapeHtml(SCRIPT_NAME)} found a newer copy on its own.</p>
           <div class="box">
@@ -3142,7 +3224,7 @@
             <li>Wait until the page loads. Then scan again.</li>
           </ol>
           <button class="go" id="installUpdate" type="button">Install the new Peculiar Line Flush</button>
-        </div>`;
+        </div></div>`;
     shadow.getElementById("installUpdate").addEventListener("click", () => {
       try {
         GM_openInTab(UPDATE_URL, { active: true, insert: true });
@@ -3218,25 +3300,40 @@
       el = document.createElement("div");
       el.id = "plf-boot-error";
       el.style.setProperty("position", "fixed", "important");
-      el.style.setProperty("left", "50%", "important");
-      el.style.setProperty("bottom", "12px", "important");
-      el.style.setProperty("transform", "translateX(-50%)", "important");
-      el.style.setProperty("width", "max-content", "important");
-      el.style.setProperty("max-width", "calc(100vw - 24px)", "important");
-      el.style.setProperty("max-height", "calc(100vh - 24px)", "important");
-      el.style.setProperty("overflow", "auto", "important");
+      el.style.setProperty("inset", "0", "important");
       el.style.setProperty("z-index", "2147483647", "important");
-      el.style.setProperty("background", "#ffffff", "important");
-      el.style.setProperty("color", "#111111", "important");
-      el.style.setProperty("border", "3px solid #111111", "important");
-      el.style.setProperty("border-radius", "12px", "important");
-      el.style.setProperty("padding", "14px 16px", "important");
-      el.style.setProperty("font", "800 18px/1.35 Segoe UI, sans-serif", "important");
-      el.style.setProperty("overflow-wrap", "anywhere", "important");
-      el.style.setProperty("box-shadow", "0 16px 40px rgba(0,0,0,.28)", "important");
+      el.style.setProperty("overflow", "hidden", "important");
+      el.style.setProperty("pointer-events", "none", "important");
+      const shadow = el.attachShadow({ mode: "open" });
+      shadow.innerHTML = `
+        <style>
+          :host { all: initial; --plf-dpr: 1; --plf-vw: 100vw; --plf-vh: 100vh; }
+          .plf-stage {
+            position: absolute; left: 0; top: 0;
+            width: var(--plf-vw); height: var(--plf-vh);
+            transform: var(--plf-fit, none);
+            transform-origin: 0 0;
+            pointer-events: none;
+          }
+          .card {
+            position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+            width: max-content;
+            max-width: calc(var(--plf-vw) - 24px);
+            max-height: calc(var(--plf-vh) - 24px);
+            overflow: auto; pointer-events: auto;
+            background: #ffffff; color: #111111;
+            border: 3px solid #111111; border-radius: 12px;
+            padding: 14px 16px;
+            font: 800 18px/1.35 "Segoe UI", sans-serif;
+            overflow-wrap: anywhere;
+            box-shadow: 0 16px 40px rgba(0,0,0,.28);
+          }
+        </style>
+        <div class="plf-stage"><div class="card" id="msg"></div></div>`;
       document.documentElement.append(el);
     }
-    el.textContent = message;
+    paintPanelScale(el);
+    el.shadowRoot.getElementById("msg").textContent = message;
   }
 
   function bootLineFlush() {
@@ -3257,6 +3354,7 @@
       if (!frameShouldRun()) return;
       if (!armed) {
         armed = true;
+        watchPanelScale();
         checkForScriptUpdate();
         setInterval(checkForScriptUpdate, 2 * 60 * 1000);
         document.addEventListener("visibilitychange", () => {
