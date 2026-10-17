@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.18
+// @version      2.9.19
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.18";
+  const VERSION = "2.9.19";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -69,6 +69,8 @@
     locations: "plf.locations",
     location: "plf.location",
     locationIdle: "plf.locationIdle",
+    panelSize: "plf.panelSize",
+    panelOpen: "plf.panelOpen",
   };
   const IDLE_LOCATION_MS = 10 * 60 * 1000;
   const TOTAL_SHEET = "TOTAL";
@@ -1470,17 +1472,36 @@
     return ratio > 0 ? ratio : 1;
   }
 
+  function panelBoost() {
+    const saved = Number(GM_getValue(KEYS.panelSize, 1));
+    if (saved === 1.25 || saved === 1.5) return saved;
+    return 1;
+  }
+
+  function panelStartsOpen() {
+    return GM_getValue(KEYS.panelOpen, true) !== false;
+  }
+
   // Lay the panel out in device pixels, then scale it back onto the window.
-  // Windows 150% with Firefox at 100% zoom then matches a 100% screen.
+  // Boost 1 matches a 100% screen. 1.25 and 1.5 make that same panel bigger.
   function paintPanelScale(el) {
     if (!el) return;
     const ratio = uiPixelRatio();
-    const width = pageWindow.innerWidth * ratio;
-    const height = pageWindow.innerHeight * ratio;
+    const boost = panelBoost();
+    const fit = boost / ratio;
     el.style.setProperty("--plf-dpr", String(ratio));
-    el.style.setProperty("--plf-vw", `${width}px`);
-    el.style.setProperty("--plf-vh", `${height}px`);
-    el.style.setProperty("--plf-fit", Math.abs(ratio - 1) < 0.02 ? "none" : `scale(${1 / ratio})`);
+    el.style.setProperty("--plf-boost", String(boost));
+    el.style.setProperty("--plf-vw", `${pageWindow.innerWidth * ratio}px`);
+    el.style.setProperty("--plf-vh", `${pageWindow.innerHeight * ratio}px`);
+    if (Math.abs(ratio - 1) < 0.02 && Math.abs(boost - 1) < 0.02) {
+      el.style.setProperty("--plf-place", "0px");
+      el.style.setProperty("--plf-stage-transform", "none");
+      el.style.setProperty("--plf-scale", "none");
+      return;
+    }
+    el.style.setProperty("--plf-place", "50%");
+    el.style.setProperty("--plf-stage-transform", `translate(-50%, -50%) scale(${fit})`);
+    el.style.setProperty("--plf-scale", `scale(${fit})`);
   }
 
   function syncPanelScale() {
@@ -1515,6 +1536,8 @@
       href: location.href,
       userAgent: navigator.userAgent,
       devicePixelRatio: uiPixelRatio(),
+      panelSize: panelBoost(),
+      panelOpen: panelStartsOpen(),
       innerWidth: pageWindow.innerWidth,
       innerHeight: pageWindow.innerHeight,
       host,
@@ -1562,6 +1585,7 @@
     hostEl.style.setProperty("overflow", "hidden", "important");
     hostEl.style.setProperty("font-family", "Segoe UI, system-ui, sans-serif", "important");
     paintPanelScale(hostEl);
+    if (!panelStartsOpen()) hostEl.classList.add("closed");
     const shadow = hostEl.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
@@ -1578,12 +1602,18 @@
           --plf-vh: 100vh;
         }
         .plf-stage {
-          position: absolute; left: 0; top: 0;
+          position: absolute; left: var(--plf-place, 0px); top: var(--plf-place, 0px);
           width: var(--plf-vw); height: var(--plf-vh);
-          transform: var(--plf-fit, none);
-          transform-origin: 0 0;
+          transform: var(--plf-stage-transform, none);
+          transform-origin: center center;
           pointer-events: none;
           container: plf / inline-size;
+        }
+        .plf-fab-dock {
+          position: absolute; right: 0; bottom: 0; width: 0; height: 0; z-index: 2;
+          transform: var(--plf-scale, none);
+          transform-origin: bottom right;
+          pointer-events: none;
         }
         * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
         .wrap {
@@ -1595,8 +1625,8 @@
         .modal {
           position: relative; z-index: 1;
           pointer-events: auto;
-          width: min(860px, calc(var(--plf-vw) - 16px));
-          max-height: calc(var(--plf-vh) - 16px);
+          width: min(860px, calc((var(--plf-vw) - 16px) / var(--plf-boost, 1)));
+          max-height: calc((var(--plf-vh) - 16px) / var(--plf-boost, 1));
           display: flex; flex-direction: column;
           background: #ffffff; color: #111111; color-scheme: light;
           border: 1px solid #d8dee8; border-radius: 12px;
@@ -1654,7 +1684,12 @@
           font-size: 12px; font-weight: 700; color: #111111; background: #ffffff;
         }
         button:hover { background: #f3f5f8; }
-        .x {
+        #panelSize {
+          flex: 0 0 auto; height: 28px; max-width: 118px;
+          border: 1px solid #111111; border-radius: 7px;
+          background: #ffffff; color: #111111;
+          font-size: 12px; font-weight: 800; padding: 0 4px;
+        }
           width: 28px; height: 28px; padding: 0; border-radius: 7px;
           background: #ffffff; color: #111111; font-size: 18px; line-height: 1;
         }
@@ -1664,7 +1699,7 @@
           padding: 8px 10px 0; background: #ffffff;
         }
         #location {
-          flex: 0 0 2.6in; width: 2.6in; max-width: calc(var(--plf-vw) * 0.42); height: 38px;
+          flex: 0 0 2.6in; width: 2.6in; max-width: calc(var(--plf-vw) * 0.42 / var(--plf-boost, 1)); height: 38px;
           border: 1px solid #111111; border-radius: 8px;
           background: #ffffff; color: #111111; font-size: 14px; font-weight: 700; padding: 0 8px;
         }
@@ -1719,7 +1754,7 @@
           background: #ffffff; color: #111111;
           border: 2px solid #111111; border-radius: 8px;
         }
-        .lineswrap, .histwrap { min-height: 0; overflow: auto; max-height: min(240px, calc(var(--plf-vh) - 230px)); }
+        .lineswrap, .histwrap { min-height: 0; overflow: auto; max-height: min(240px, calc((var(--plf-vh) - 230px) / var(--plf-boost, 1))); }
         .histhead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
         .histhead span { font-size: 11px; letter-spacing: .12em; font-weight: 700; color: #111111; }
         #filter {
@@ -1759,19 +1794,19 @@
           display: none;
           position: fixed;
           left: 50%; top: 50%; transform: translate(-50%, -50%);
-          max-width: calc(var(--plf-vw) - 24px); max-height: calc(var(--plf-vh) - 24px);
+          max-width: calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)); max-height: calc((var(--plf-vh) - 24px) / var(--plf-boost, 1));
           height: auto; overflow: auto; pointer-events: auto;
         }
         .locprompt.open, .dbg.open, .sharebox.open, .excelock.open, .accessdeny.open { display: block; }
-        .locprompt, .sharebox, .excelock { z-index: 40; width: min(640px, calc(var(--plf-vw) - 24px)); }
+        .locprompt, .sharebox, .excelock { z-index: 40; width: min(640px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1))); }
         .howto { margin: 0; padding-left: 28px; }
         .howto li { font-size: 18px; font-weight: 800; line-height: 1.35; margin: 8px 0; }
         .sharebox { z-index: 41; }
-        .dbg { z-index: 50; width: min(640px, calc(var(--plf-vw) - 24px)); }
+        .dbg { z-index: 50; width: min(640px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1))); }
         .excelock { z-index: 60; }
-        .accessdeny { z-index: 70; width: min(720px, calc(var(--plf-vw) - 24px)); }
+        .accessdeny { z-index: 70; width: min(720px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1))); }
         .locprompt-card {
-          width: min(640px, calc(var(--plf-vw) - 24px));
+          width: min(640px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)));
           display: flex; flex-direction: column; gap: 8px;
           padding: 14px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1779,12 +1814,12 @@
         }
         .locprompt-title { font-size: 16px; font-weight: 800; }
         .locprompt-for { font-size: 13px; font-weight: 700; word-break: break-word; }
-        .locprompt-list { display: grid; gap: 6px; overflow: auto; max-height: min(280px, calc(var(--plf-vh) * 0.46)); }
+        .locprompt-list { display: grid; gap: 6px; overflow: auto; max-height: min(280px, calc(var(--plf-vh) * 0.46 / var(--plf-boost, 1))); }
         .locprompt-list button, .locprompt-actions button { text-align: left; }
         .locprompt-actions { display: flex; gap: 8px; }
         .locprompt-actions button { flex: 1; text-align: center; }
         .dbg-card {
-          width: min(640px, calc(var(--plf-vw) - 24px));
+          width: min(640px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)));
           display: flex; flex-direction: column; gap: 8px;
           padding: 14px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1792,14 +1827,14 @@
         }
         .dbg-title { font-size: 16px; font-weight: 800; }
         #dbgText {
-          width: 100%; min-height: 160px; max-height: min(360px, calc(var(--plf-vh) - 220px)); resize: vertical;
+          width: 100%; min-height: 160px; max-height: min(360px, calc((var(--plf-vh) - 220px) / var(--plf-boost, 1))); resize: vertical;
           border: 1px solid #111111; border-radius: 8px; padding: 8px;
           background: #ffffff; color: #111111;
           font: 12px/1.4 Consolas, "Courier New", monospace;
         }
         .dbg-actions { display: flex; gap: 8px; justify-content: flex-end; }
         .sharebox-card {
-          width: min(640px, calc(var(--plf-vw) - 24px));
+          width: min(640px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)));
           display: flex; flex-direction: column; gap: 10px;
           padding: 16px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1820,7 +1855,7 @@
         }
         #shareClose { height: 40px; font-weight: 800; }
         .excelock-card {
-          width: min(640px, calc(var(--plf-vw) - 24px));
+          width: min(640px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)));
           display: flex; flex-direction: column; gap: 10px;
           padding: 16px; background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 12px;
@@ -1839,7 +1874,7 @@
         }
         #excelockRetry:disabled { opacity: .55; cursor: default; }
         .accessdeny-card {
-          width: min(720px, calc(var(--plf-vw) - 24px));
+          width: min(720px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)));
           display: flex; flex-direction: column; gap: 12px;
           padding: 18px; background: #ffffff; color: #111111;
           border: 6px solid #111111; border-radius: 16px;
@@ -1878,8 +1913,8 @@
         @container plf (max-width: 720px) {
           .split { grid-template-columns: 1fr; }
           .history { border-left: 0; border-top: 1px solid #e4e7ec; }
-          .modal { max-height: calc(var(--plf-vh) - 12px); }
-          .lineswrap, .histwrap { max-height: min(160px, calc(var(--plf-vh) - 280px)); }
+          .modal { max-height: calc((var(--plf-vh) - 12px) / var(--plf-boost, 1)); }
+          .lineswrap, .histwrap { max-height: min(160px, calc((var(--plf-vh) - 280px) / var(--plf-boost, 1))); }
         }
       </style>
       <div class="plf-stage" id="stage">
@@ -1897,6 +1932,11 @@
                 <div class="clock" id="clock">00:00:00</div>
             <button id="share" type="button" title="Share the Tampermonkey install link">Share</button>
             <button id="debug" title="Copy debug JSON">Debug</button>
+            <select id="panelSize" title="Panel size. Screen matches your display. +25% and +50% make this panel bigger.">
+              <option value="1">Screen</option>
+              <option value="1.25">+25%</option>
+              <option value="1.5">+50%</option>
+            </select>
               <button class="x" id="close" title="Close">×</button>
             </div>
           <div class="scanrow">
@@ -2028,8 +2068,8 @@
           </div>
         </div>
       </div>
-      <button class="fab" id="fab">Line Flush</button>
-      </div>`;
+      </div>
+      <div class="plf-fab-dock"><button class="fab" id="fab">Line Flush</button></div>`;
     document.documentElement.append(hostEl);
 
     const input = shadow.getElementById("q");
@@ -2067,7 +2107,7 @@
     let excelLockOpen = false;
     let excelLockRetrying = false;
     let accessDeniedOpen = false;
-    let open = true;
+    let open = !hostEl.classList.contains("closed");
     let toastedNotice = "";
     let toastedError = "";
     let alias = "";
@@ -2413,12 +2453,21 @@
       if (!on && (excelLockOpen || accessDeniedOpen)) return;
       open = on;
       hostEl.classList.toggle("closed", !on);
+      GM_setValue(KEYS.panelOpen, !!on);
       document.documentElement.style.overflow = "";
       if (on) setTimeout(focusScanBox, 50);
     }
 
     shadow.getElementById("close").addEventListener("click", () => setOpen(false));
     shadow.getElementById("fab").addEventListener("click", () => setOpen(true));
+    const panelSize = shadow.getElementById("panelSize");
+    panelSize.value = String(panelBoost());
+    panelSize.addEventListener("change", () => {
+      const next = Number(panelSize.value);
+      GM_setValue(KEYS.panelSize, next === 1.25 || next === 1.5 ? next : 1);
+      syncPanelScale();
+      if (open) setTimeout(focusScanBox, 50);
+    });
     const locationSelect = shadow.getElementById("location");
     const deleteLocationButton = shadow.getElementById("delLoc");
 
@@ -3058,17 +3107,17 @@
         :host { all: initial; --plf-dpr: 1; --plf-vw: 100vw; --plf-vh: 100vh; }
         * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
         .plf-stage {
-          position: absolute; left: 0; top: 0;
+          position: absolute; left: var(--plf-place, 0px); top: var(--plf-place, 0px);
           width: var(--plf-vw); height: var(--plf-vh);
-          transform: var(--plf-fit, none);
-          transform-origin: 0 0;
+          transform: var(--plf-stage-transform, none);
+          transform-origin: center center;
           pointer-events: auto;
         }
         .card {
           position: fixed; z-index: 1;
           left: 50%; top: 50%; transform: translate(-50%, -50%);
-          width: min(760px, calc(var(--plf-vw) - 24px));
-          max-height: calc(var(--plf-vh) - 24px);
+          width: min(760px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)));
+          max-height: calc((var(--plf-vh) - 24px) / var(--plf-boost, 1));
           overflow: auto;
           background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 14px;
@@ -3169,17 +3218,17 @@
         :host { all: initial; --plf-dpr: 1; --plf-vw: 100vw; --plf-vh: 100vh; }
         * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
         .plf-stage {
-          position: absolute; left: 0; top: 0;
+          position: absolute; left: var(--plf-place, 0px); top: var(--plf-place, 0px);
           width: var(--plf-vw); height: var(--plf-vh);
-          transform: var(--plf-fit, none);
-          transform-origin: 0 0;
+          transform: var(--plf-stage-transform, none);
+          transform-origin: center center;
           pointer-events: auto;
         }
         .card {
           position: fixed; z-index: 1;
           left: 50%; top: 50%; transform: translate(-50%, -50%);
-          width: min(640px, calc(var(--plf-vw) - 24px));
-          max-height: calc(var(--plf-vh) - 24px);
+          width: min(640px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)));
+          max-height: calc((var(--plf-vh) - 24px) / var(--plf-boost, 1));
           overflow: auto;
           background: #ffffff; color: #111111;
           border: 3px solid #111111; border-radius: 14px;
@@ -3307,19 +3356,18 @@
       const shadow = el.attachShadow({ mode: "open" });
       shadow.innerHTML = `
         <style>
-          :host { all: initial; --plf-dpr: 1; --plf-vw: 100vw; --plf-vh: 100vh; }
-          .plf-stage {
-            position: absolute; left: 0; top: 0;
-            width: var(--plf-vw); height: var(--plf-vh);
-            transform: var(--plf-fit, none);
-            transform-origin: 0 0;
+          :host { all: initial; --plf-dpr: 1; --plf-boost: 1; --plf-vw: 100vw; --plf-vh: 100vh; }
+          .plf-boot-dock {
+            position: absolute; left: 50%; bottom: 0; width: 0; height: 0;
+            transform: var(--plf-scale, none);
+            transform-origin: bottom center;
             pointer-events: none;
           }
           .card {
             position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
             width: max-content;
-            max-width: calc(var(--plf-vw) - 24px);
-            max-height: calc(var(--plf-vh) - 24px);
+            max-width: calc((var(--plf-vw) - 24px) / var(--plf-boost, 1));
+            max-height: calc((var(--plf-vh) - 24px) / var(--plf-boost, 1));
             overflow: auto; pointer-events: auto;
             background: #ffffff; color: #111111;
             border: 3px solid #111111; border-radius: 12px;
@@ -3329,7 +3377,7 @@
             box-shadow: 0 16px 40px rgba(0,0,0,.28);
           }
         </style>
-        <div class="plf-stage"><div class="card" id="msg"></div></div>`;
+        <div class="plf-boot-dock"><div class="card" id="msg"></div></div>`;
       document.documentElement.append(el);
     }
     paintPanelScale(el);
