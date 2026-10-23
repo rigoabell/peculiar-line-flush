@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.20
+// @version      2.9.21
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -9,6 +9,9 @@
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/*
+// @match        https://*.cloudfront.net/idp-selection*
+// @match        https://*.federated-auth.aft.a2z.com/*
+// @match        https://qifcr.na.aftx.amazonoperations.app/*
 // @connect      amazon-my.sharepoint.com
 // @connect      raw.githubusercontent.com
 // @run-at       document-start
@@ -42,7 +45,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.20";
+  const VERSION = "2.9.21";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -117,6 +120,7 @@
 
   const host = location.hostname;
   const isPeculiar = /peculiar-inventory|aft-aging-inventory/i.test(host);
+  const isLoginChooser = /idp-selection|federated-auth\.aft\.a2z\.com|qifcr\.na\.aftx\.amazonoperations\.app/i.test(location.href);
   const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   let isTop = true;
   try {
@@ -3406,6 +3410,67 @@
       showBootError(`${SCRIPT_NAME} did not start: ${err.message || err}`);
     }
   }
+
+  function chooseItServiceLogin() {
+    let clicked = false;
+    const visit = (el) => {
+      if (clicked || !el) return;
+      const label = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      if (label !== "IT Service Login") return;
+      const button = el.closest("alchemy-button, button, a, [role='button']") || el;
+      const buttonLabel = (button.innerText || button.textContent || "").replace(/\s+/g, " ").trim();
+      if (buttonLabel !== "IT Service Login" || /MAASK/i.test(buttonLabel)) return;
+      if (button.dataset.plfItLogin === "1") {
+        clicked = true;
+        return;
+      }
+      button.dataset.plfItLogin = "1";
+      const inner = button.shadowRoot && button.shadowRoot.querySelector("button, a, [role='button']");
+      (inner || button).click();
+      clicked = true;
+    };
+    const walk = (root) => {
+      if (!root || !root.querySelectorAll) return;
+      root.querySelectorAll("alchemy-button, button, a, [role='button'], span.button__label").forEach((el) => {
+        visit(el);
+        if (el.shadowRoot) walk(el.shadowRoot);
+      });
+    };
+    walk(document);
+    return clicked;
+  }
+
+  function watchItServiceLogin() {
+    if (!isLoginChooser) return;
+    const tryClick = () => {
+      try {
+        chooseItServiceLogin();
+      } catch {
+        /* The login page changed shape. */
+      }
+    };
+    const onChooser = /idp-selection|federated-auth\.aft\.a2z\.com/i.test(location.href);
+    if (!onChooser) {
+      let tries = 0;
+      const timer = setInterval(() => {
+        tries += 1;
+        tryClick();
+        if (tries >= 20) clearInterval(timer);
+      }, 500);
+      return;
+    }
+    tryClick();
+    const arm = () => {
+      if (!document.documentElement) return;
+      tryClick();
+      const obs = new MutationObserver(tryClick);
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+      setTimeout(() => obs.disconnect(), 60000);
+    };
+    if (document.documentElement) arm();
+    else document.addEventListener("DOMContentLoaded", arm, { once: true });
+  }
+  watchItServiceLogin();
 
   if (isPeculiar) {
     let armed = false;
