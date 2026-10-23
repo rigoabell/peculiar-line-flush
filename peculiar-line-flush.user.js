@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.19
+// @version      2.9.20
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
@@ -42,7 +42,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.19";
+  const VERSION = "2.9.20";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1452,6 +1452,17 @@
     return s ? escapeHtml(s) : "<span class='empty'>—</span>";
   }
 
+  function fcResearchUrl(sku) {
+    return `https://qifcr.na.aftx.amazonoperations.app/MEM3/results?s=${encodeURIComponent(sku)}`;
+  }
+
+  function skuLink(sku) {
+    const text = cellText(sku);
+    if (!text) return "<span class='empty'>—</span>";
+    const href = fcResearchUrl(text);
+    return `<a class="sku" href="${escapeHtml(href)}" target="_blank" rel="noopener" title="Search ${escapeHtml(text)} in FcResearch">${escapeHtml(text)}</a>`;
+  }
+
   function loadHistory(alias) {
     const pack = GM_getValue(KEYS.history, null);
     if (!pack || pack.day !== dayStamp() || pack.alias !== alias || !Array.isArray(pack.rows)) return [];
@@ -1767,6 +1778,7 @@
         th { text-align: left; color: #111111; font-weight: 650; padding: 2px 6px; border-bottom: 1px solid #e4e7ec; position: sticky; top: 0; background: #ffffff; z-index: 1; }
         td { padding: 3px 6px; border-bottom: 1px solid #eef1f5; font-variant-numeric: tabular-nums; }
         #lines tr.aged td { background: var(--row); color: var(--ink); }
+        #lines a.sku { color: inherit; font-weight: 800; text-decoration: underline; }
         .histwrap tr { cursor: pointer; }
         .histwrap tr:hover { background: #f3f5f8; }
         .histwrap tr.active { background: #e7edf5; }
@@ -2370,7 +2382,7 @@
                 const tone = /^unowned$/i.test(cellText(r.owner)) ? ageTone(99) : ageTone(parseAgeDays(r.age));
                 if (tone.bg !== "#ffffff") paint = ` class="aged" style="--row:${tone.bg};--ink:${tone.fg}"`;
               }
-              return `<tr${paint}><td>${dash(r.age)}</td><td>${dash(r.fcSku)}</td><td>${dash(r.quantity)}</td><td>${dash(r.owner)}</td><td>${dash(r.disposition)}</td></tr>`;
+              return `<tr${paint}><td>${dash(r.age)}</td><td>${skuLink(r.fcSku)}</td><td>${dash(r.quantity)}</td><td>${dash(r.owner)}</td><td>${dash(r.disposition)}</td></tr>`;
             })
             .join("")
         : `<tr><td colspan="5" class="empty">No inventory lines</td></tr>`;
