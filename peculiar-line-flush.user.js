@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.22
+// @version      2.9.23
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder.
@@ -45,7 +45,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.22";
+  const VERSION = "2.9.23";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -531,6 +531,11 @@
     return "tag-err";
   }
 
+  function locationHue(index) {
+    const hue = Math.round((index * 137.508) % 360);
+    return `hsl(${hue}, 62%, 42%)`;
+  }
+
   function pieChart(slices) {
     const parts = slices.filter((slice) => slice.count > 0);
     const total = parts.reduce((sum, slice) => sum + slice.count, 0);
@@ -600,7 +605,17 @@
           `<div class="dash-key"><span class="swatch" style="background:${slice.color}"></span><span>${escapeHtml(slice.name)}</span><b>${slice.count}</b></div>`
       )
       .join("");
-    const byLocation = summary.locations.map((loc) => ({ label: loc.name, count: loc.containers }));
+    const locSlices = summary.locations.map((loc, index) => ({
+      name: loc.name,
+      count: loc.containers,
+      color: locationHue(index),
+    }));
+    const locLegend = locSlices
+      .map(
+        (slice) =>
+          `<div class="dash-key"><span class="swatch" style="background:${slice.color}"></span><span>${escapeHtml(slice.name)}</span><b>${slice.count}</b></div>`
+      )
+      .join("");
     const parents = [];
     const parentCounts = new Map();
     for (const rec of list) {
@@ -644,7 +659,7 @@
         return `<div class="dash-loc">${escapeHtml(loc.name)} · ${locCount} containers · ${locAlert} alert</div>${parentsHtml}`;
       })
       .join("");
-    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-charts"><div class="dash-pie">${pieChart(slices)}</div><div class="dash-legend">${legend}</div></div><div class="dash-section">BY LOCATION</div>${barChart(byLocation, "")}<div class="dash-section">BY PARENT</div>${barChart(parents, "parent")}<div class="dash-section">CONTAINERS</div>${grouped}`;
+    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-equal"><section class="dash-pane"><div class="dash-section">AGE</div><div class="dash-charts"><div class="dash-pie">${pieChart(slices)}</div><div class="dash-legend">${legend}</div></div></section><section class="dash-pane"><div class="dash-section">LOCATION</div><div class="dash-charts"><div class="dash-pie">${pieChart(locSlices)}</div><div class="dash-legend">${locLegend}</div></div></section></div><div class="dash-rule"><div class="dash-section">BY PARENT</div>${barChart(parents, "parent")}</div><div class="dash-rule"><div class="dash-section">CONTAINERS</div>${grouped}</div>`;
   }
 
   function splitIdType(raw) {
@@ -2003,7 +2018,7 @@
         .bar {
           display: flex; align-items: center; gap: 8px;
           min-height: 40px; padding: 6px 8px 6px 12px;
-          background: #ffffff; border-bottom: 1px solid #e4e7ec;
+          background: #ffffff; border-bottom: 2px solid #111111;
         }
         .bar button, .clock, .lamps { flex: 0 0 auto; }
         .who {
@@ -2051,7 +2066,8 @@
         .x:hover { background: #f3f5f8; }
         .scanrow {
           display: flex; align-items: center; gap: 8px;
-          padding: 8px 10px 0; background: #ffffff;
+          padding: 8px 10px; background: #ffffff;
+          border-bottom: 2px solid #111111;
         }
         #location {
           flex: 0 0 2.6in; width: 2.6in; max-width: calc(var(--plf-vw) * 0.42 / var(--plf-boost, 1)); height: 38px;
@@ -2068,10 +2084,15 @@
         }
         #q::placeholder, #filter::placeholder { color: #667085; }
         #q:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(17,17,17,.12); }
-        .ageboard {
+        .focusrow {
+          display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+          margin: 8px 10px 0; padding-bottom: 8px;
+          border-bottom: 2px solid #111111;
+        }
+        .ageboard, .locboard {
           display: flex; align-items: baseline; gap: 10px;
-          margin: 8px 10px 0; padding: 6px 12px;
-          border: 1px solid #d8dee8; border-radius: 8px; background: #ffffff; color: #111111;
+          min-width: 0; margin: 0; padding: 8px 12px;
+          border: 2px solid #111111; border-radius: 8px; background: #ffffff; color: #111111;
           transition: background .2s linear, border-color .2s linear;
         }
         .age-kicker { font-size: 11px; letter-spacing: .12em; font-weight: 700; opacity: .8; }
@@ -2091,17 +2112,18 @@
           flex: 1 1 auto;
           min-height: 0;
           display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .9fr);
+          border-top: 2px solid #111111;
         }
         .ticket, .history {
           min-height: 0; display: flex; flex-direction: column;
           padding: 8px 10px 0;
         }
-        .history { border-left: 1px solid #e4e7ec; padding-right: 8px; background: #ffffff; }
+        .history { border-left: 2px solid #111111; padding-right: 8px; background: #ffffff; }
         .history table { table-layout: fixed; }
         .history th:nth-child(1), .history td:nth-child(1) { width: 52px; }
         .history th:nth-child(3), .history td:nth-child(3) { width: 72px; }
         .history th:nth-child(4), .history td:nth-child(4) { width: 44px; }
-        .bar, .scanrow, .status, .ageboard, .identity, .foot { position: relative; z-index: 1; flex: 0 0 auto; }
+        .bar, .scanrow, .status, .focusrow, .identity, .foot { position: relative; z-index: 1; flex: 0 0 auto; }
         .identity {
           margin: 8px 10px 0; padding: 8px 10px;
           font-size: 16px; font-weight: 800; line-height: 1.35;
@@ -2132,7 +2154,7 @@
         .foot {
           display: flex; align-items: center; gap: 8px;
           min-height: 34px; padding: 6px 10px;
-          border-top: 1px solid #e4e7ec; background: #ffffff;
+          border-top: 2px solid #111111; background: #ffffff;
           font-size: 12px; color: #111111;
         }
         .foot b { color: #111111; }
@@ -2186,13 +2208,21 @@
         }
         .dash-totals b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
         .dash-totals span { font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+        .dash-equal { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .dash-pane {
+          min-width: 0;
+          border: 2px solid #111111;
+          border-radius: 10px;
+          padding: 10px;
+        }
+        .dash-rule { border-top: 2px solid #111111; padding-top: 10px; }
         .dash-charts { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
         .dash-pie { flex: 0 0 180px; }
         .dash-pie svg { width: 180px; height: 180px; display: block; }
-        .dash-legend { flex: 1 1 180px; display: grid; gap: 6px; }
+        .dash-legend { flex: 1 1 140px; display: grid; gap: 6px; max-height: 180px; overflow: auto; }
         .dash-key { display: flex; align-items: center; gap: 8px; font-weight: 800; }
         .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #111111; }
-        .dash-section { font-size: 12px; font-weight: 800; letter-spacing: .08em; }
+        .dash-section { font-size: 12px; font-weight: 800; letter-spacing: .08em; margin-bottom: 8px; }
         .barrow {
           display: grid;
           grid-template-columns: minmax(90px, 180px) minmax(40px, 1fr) 36px;
@@ -2354,8 +2384,8 @@
         :host(.closed) .fab { display: block; pointer-events: auto !important; }
         :host(.closed) { pointer-events: none !important; }
         @container plf (max-width: 720px) {
-          .split { grid-template-columns: 1fr; }
-          .history { border-left: 0; border-top: 1px solid #e4e7ec; }
+          .split, .focusrow, .dash-equal { grid-template-columns: 1fr; }
+          .history { border-left: 0; border-top: 2px solid #111111; }
           .modal { max-height: calc((var(--plf-vh) - 12px) / var(--plf-boost, 1)); }
           .lineswrap, .histwrap { max-height: min(160px, calc((var(--plf-vh) - 280px) / var(--plf-boost, 1))); }
         }
@@ -2389,11 +2419,18 @@
             <input id="q" type="text" placeholder="Scan container" autocomplete="off" spellcheck="false" />
             </div>
           <div class="status ready" id="note">Ready</div>
+          <div class="focusrow">
             <div class="ageboard" id="ageBoard">
-            <div class="age-kicker" id="ageKicker">AGE</div>
-            <div class="age-val" id="ageVal">Scan</div>
-                <div class="age-tag" id="ageTag">—</div>
-              </div>
+              <div class="age-kicker" id="ageKicker">AGE</div>
+              <div class="age-val" id="ageVal">Scan</div>
+              <div class="age-tag" id="ageTag">—</div>
+            </div>
+            <div class="locboard" id="locBoard">
+              <div class="age-kicker">LOCATION</div>
+              <div class="age-val" id="locVal">Select</div>
+              <div class="age-tag" id="locTag">—</div>
+            </div>
+          </div>
           <div class="identity" id="identity"><span class="empty">No container yet</span></div>
           <div class="split">
           <div class="ticket">
@@ -2803,10 +2840,22 @@
       return { total: recent.length, ok, miss, err };
     }
 
+    function paintLocationBoard() {
+      const val = shadow.getElementById("locVal");
+      const tag = shadow.getElementById("locTag");
+      if (!val || !tag) return;
+      val.textContent = selectedLocation || "Select";
+      const count = selectedLocation
+        ? recent.filter((row) => historyRecord(row).location === selectedLocation).length
+        : 0;
+      tag.textContent = selectedLocation ? String(count) : "—";
+    }
+
     function renderStats() {
       const c = counts();
       shadow.getElementById("counts").innerHTML =
         `<b>${c.total}</b> · <b class="st-ok">${c.ok}</b> ok · <b class="st-miss">${c.miss}</b> miss · <b class="st-err">${c.err}</b> err`;
+      paintLocationBoard();
     }
 
     function showTicket(id, result) {
@@ -2947,6 +2996,7 @@
       locationSelect.value = names.includes(selectedLocation) ? selectedLocation : "";
       if (locationSelect.value !== selectedLocation) selectedLocation = locationSelect.value;
       deleteLocationButton.disabled = !customLocations.includes(selectedLocation);
+      paintLocationBoard();
     }
 
     customLocations = loadCustomLocations();
