@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.21
+// @version      2.9.22
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the Line Flush Records folder.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -32,7 +32,7 @@
   Each operator scans in the panel. Each person gets their own daily file in:
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
-  Each location is its own sheet in that workbook.
+  The file matches the Dashboard screen: totals, each location, then each container with its parent, age, and status.
 
   1. Install from the GitHub raw link. Do not paste this file into Tampermonkey.
   2. Open AFT Aging Inventory MEM3, finish Midway, leave that tab open.
@@ -45,7 +45,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.21";
+  const VERSION = "2.9.22";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -153,7 +153,7 @@
   let lastDebug = null;
   let focusNote = "";
   const recent = [];
-  const sosCache = { alias: "", day: "", name: "", book: null };
+  const sosCache = { alias: "", day: "", name: "", book: null, records: [] };
   let selectedLocation = "";
   let customLocations = [];
   let lastScanAt = 0;
@@ -318,6 +318,333 @@
       label: age >= 5 ? "ALERT" : age >= 2 ? "CAUTION" : "GOOD",
       pct: Math.max(2, Math.min(100, (Math.min(age, 5) / 5) * 100)),
     };
+  }
+
+  const DASH_COLORS = {
+    Alert: "#b42318",
+    Caution: "#f5c518",
+    Good: "#0d7a3f",
+    "No age": "#98a2b3",
+  };
+
+  function ageStatus(ageRaw) {
+    const tone = ageTone(parseAgeDays(ageRaw));
+    if (tone.label === "ALERT") return "Alert";
+    if (tone.label === "CAUTION") return "Caution";
+    if (tone.label === "GOOD") return "Good";
+    return "No age";
+  }
+
+  function unitCount(value) {
+    const n = Number(String(value ?? "").replace(/,/g, "").trim());
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function formatUnits(n) {
+    if (!Number.isFinite(n)) return "0";
+    return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
+  }
+
+  function scanRecord(containerId, result, location) {
+    const notFound = result?.error === "NOT_FOUND" || result?.error === "NOT FOUND";
+    const ok = Boolean(result?.ok) && !notFound;
+    let status = "Error";
+    if (ok) status = ageStatus(result?.oldestAge);
+    else if (notFound) status = "Not found";
+    return {
+      location: normalizeLocation(location) || "Unknown",
+      parent: cellText(result?.parentContainer) || "(no parent)",
+      container: cellText(result?.containerId) || cellText(containerId),
+      age: ok ? cellText(result?.oldestAge) : "",
+      status,
+      units: ok ? cellText(result?.totalUnits) : "",
+    };
+  }
+
+  function historyRecord(row) {
+    if (row?.record?.container) return row.record;
+    const result = row?.result || {};
+    const notFound = result.error === "NOT_FOUND" || row?.status === "NOT FOUND" || row?.status === "NOT_FOUND";
+    const ok = !notFound && (result.ok === true || row?.status === "OK");
+    return scanRecord(
+      row?.id,
+      {
+        ok,
+        error: notFound ? "NOT_FOUND" : ok ? "" : result.error || row?.status || "ERROR",
+        containerId: result.containerId || row?.id,
+        oldestAge: result.oldestAge || row?.age || "",
+        parentContainer: result.parentContainer || "",
+        totalUnits: result.totalUnits || "",
+      },
+      row?.location || ""
+    );
+  }
+
+  function emptyTally() {
+    return { containers: 0, units: 0, alert: 0, caution: 0, good: 0, noAge: 0, miss: 0, err: 0 };
+  }
+
+  function addTally(tally, rec) {
+    tally.containers += 1;
+    tally.units += unitCount(rec.units);
+    if (rec.status === "Alert") tally.alert += 1;
+    else if (rec.status === "Caution") tally.caution += 1;
+    else if (rec.status === "Good") tally.good += 1;
+    else if (rec.status === "No age") tally.noAge += 1;
+    else if (rec.status === "Not found") tally.miss += 1;
+    else tally.err += 1;
+  }
+
+  function summarizeRecords(records) {
+    const all = emptyTally();
+    const locations = [];
+    const byName = new Map();
+    for (const rec of records || []) {
+      addTally(all, rec);
+      const name = rec.location || "Unknown";
+      let loc = byName.get(name);
+      if (!loc) {
+        loc = { name, ...emptyTally() };
+        byName.set(name, loc);
+        locations.push(loc);
+      }
+      addTally(loc, rec);
+    }
+    return { ...all, locations };
+  }
+
+  function tallyCells(name, tally) {
+    return [
+      name,
+      formatUnits(tally.containers),
+      formatUnits(tally.units),
+      formatUnits(tally.alert),
+      formatUnits(tally.caution),
+      formatUnits(tally.good),
+      formatUnits(tally.noAge),
+      formatUnits(tally.miss),
+      formatUnits(tally.err),
+    ];
+  }
+
+  function dashboardSheetRows(records) {
+    const summary = summarizeRecords(records);
+    const rows = [
+      ["Today", "Containers", "Units", "Alert", "Caution", "Good", "No age", "Not found", "Errors"],
+      tallyCells("Today", summary),
+      [],
+      ["Location", "Containers", "Units", "Alert", "Caution", "Good", "No age", "Not found", "Errors"],
+    ];
+    for (const loc of summary.locations) rows.push(tallyCells(loc.name, loc));
+    rows.push([]);
+    rows.push(["Location", "Parent", "Container", "Age", "Status", "Units"]);
+    for (const rec of records || []) {
+      rows.push([rec.location, rec.parent, rec.container, rec.age, rec.status, rec.units]);
+    }
+    return rows;
+  }
+
+  function recordsFromLegacy(book) {
+    const records = [];
+    for (const sheet of book?.sheets || []) {
+      if (String(sheet.name || "").toLowerCase() === TOTAL_SHEET.toLowerCase()) continue;
+      const header = sheet.rows?.[0] || [];
+      if (cellText(header[0]) !== "Container ID") continue;
+      const col = (name) => header.findIndex((cell) => cellText(cell) === name);
+      const idCol = col("Container ID");
+      const unitCol = col("Total Units");
+      const ageCol = col("Oldest Units Age");
+      const parentCol = col("Parent Container");
+      const statusCol = col("Status");
+      for (const row of sheet.rows.slice(1)) {
+        const container = cellText(row[idCol]);
+        const rawStatus = cellText(row[statusCol]);
+        if (!container || !rawStatus) continue;
+        let status = "Error";
+        if (rawStatus === "OK") status = ageStatus(row[ageCol]);
+        else if (rawStatus === "NOT FOUND" || rawStatus === "NOT_FOUND") status = "Not found";
+        records.push({
+          location: sheet.name || "Unknown",
+          parent: cellText(row[parentCol]) || "(no parent)",
+          container,
+          age: rawStatus === "OK" ? cellText(row[ageCol]) : "",
+          status,
+          units: rawStatus === "OK" ? cellText(row[unitCol]) : "",
+        });
+      }
+    }
+    return records;
+  }
+
+  function recordsFromBook(book) {
+    for (const sheet of book?.sheets || []) {
+      const rows = sheet.rows || [];
+      const start = rows.findIndex((row) => row[0] === "Location" && row[1] === "Parent" && row[2] === "Container");
+      if (start < 0) continue;
+      const records = [];
+      for (const row of rows.slice(start + 1)) {
+        const container = cellText(row[2]);
+        if (!container) continue;
+        records.push({
+          location: cellText(row[0]) || "Unknown",
+          parent: cellText(row[1]) || "(no parent)",
+          container,
+          age: cellText(row[3]),
+          status: cellText(row[4]) || "Error",
+          units: cellText(row[5]),
+        });
+      }
+      return records;
+    }
+    return recordsFromLegacy(book);
+  }
+
+  function sameDashboardRecord(a, b) {
+    const locOk = a.location === b.location || a.location === "Unknown" || b.location === "Unknown";
+    return (
+      locOk &&
+      a.parent === b.parent &&
+      a.container === b.container &&
+      a.age === b.age &&
+      a.status === b.status &&
+      String(a.units) === String(b.units)
+    );
+  }
+
+  function mergeRecords(fileRecords, localRecords) {
+    const pool = (fileRecords || []).map((rec) => ({ rec, used: false }));
+    const extras = [];
+    for (const local of localRecords || []) {
+      const hit = pool.find((item) => !item.used && sameDashboardRecord(item.rec, local));
+      if (hit) hit.used = true;
+      else extras.push(local);
+    }
+    return [...(fileRecords || []), ...extras];
+  }
+
+  function statusClass(status) {
+    if (status === "Alert") return "tag-alert";
+    if (status === "Caution") return "tag-caution";
+    if (status === "Good") return "tag-good";
+    if (status === "Not found") return "tag-miss";
+    if (status === "No age") return "tag-none";
+    return "tag-err";
+  }
+
+  function pieChart(slices) {
+    const parts = slices.filter((slice) => slice.count > 0);
+    const total = parts.reduce((sum, slice) => sum + slice.count, 0);
+    const label = parts.map((slice) => `${slice.name} ${slice.count}`).join(", ") || "No age chart";
+    if (!total) return `<div class="empty">No found containers yet</div>`;
+    if (parts.length === 1) {
+      return `<svg viewBox="0 0 180 180" role="img" aria-label="${escapeHtml(label)}"><circle cx="90" cy="90" r="70" fill="${parts[0].color}"></circle></svg>`;
+    }
+    let angle = -Math.PI / 2;
+    const arcs = parts.map((part) => {
+      const sweep = (part.count / total) * Math.PI * 2;
+      const start = angle;
+      angle += sweep;
+      const x1 = 90 + 70 * Math.cos(start);
+      const y1 = 90 + 70 * Math.sin(start);
+      const x2 = 90 + 70 * Math.cos(angle);
+      const y2 = 90 + 70 * Math.sin(angle);
+      const large = sweep > Math.PI ? 1 : 0;
+      return `<path d="M 90 90 L ${x1.toFixed(2)} ${y1.toFixed(2)} A 70 70 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z" fill="${part.color}"></path>`;
+    });
+    return `<svg viewBox="0 0 180 180" role="img" aria-label="${escapeHtml(label)}">${arcs.join("")}</svg>`;
+  }
+
+  function barChart(rows, fillClass) {
+    if (!rows.length) return `<div class="empty">None yet</div>`;
+    const max = Math.max(...rows.map((row) => row.count), 1);
+    return rows
+      .map((row) => {
+        const width = Math.max(2, (row.count / max) * 100);
+        return `<div class="barrow"><div class="barlabel" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</div><div class="bartrack"><div class="barfill ${fillClass || ""}" style="width:${width}%"></div></div><div class="barcount">${row.count}</div></div>`;
+      })
+      .join("");
+  }
+
+  function tallyBoxes(tally) {
+    const boxes = [
+      ["Containers", tally.containers],
+      ["Units", formatUnits(tally.units)],
+      ["Alert", tally.alert],
+      ["Caution", tally.caution],
+      ["Good", tally.good],
+      ["No age", tally.noAge],
+      ["Not found", tally.miss],
+      ["Errors", tally.err],
+    ];
+    return `<div class="dash-totals">${boxes
+      .map(([label, value]) => `<div><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></div>`)
+      .join("")}</div>`;
+  }
+
+  function dashboardHtml(records, who) {
+    const list = records || [];
+    const summary = summarizeRecords(list);
+    const whoLine = `${who || "Operator"} · ${dayStamp()}`;
+    if (!list.length) {
+      return `<div class="dash-who">${escapeHtml(whoLine)}</div><div class="empty">No scans yet today.</div>`;
+    }
+    const slices = [
+      { name: "Alert", count: summary.alert, color: DASH_COLORS.Alert },
+      { name: "Caution", count: summary.caution, color: DASH_COLORS.Caution },
+      { name: "Good", count: summary.good, color: DASH_COLORS.Good },
+    ];
+    if (summary.noAge) slices.push({ name: "No age", count: summary.noAge, color: DASH_COLORS["No age"] });
+    const legend = slices
+      .map(
+        (slice) =>
+          `<div class="dash-key"><span class="swatch" style="background:${slice.color}"></span><span>${escapeHtml(slice.name)}</span><b>${slice.count}</b></div>`
+      )
+      .join("");
+    const byLocation = summary.locations.map((loc) => ({ label: loc.name, count: loc.containers }));
+    const parents = [];
+    const parentCounts = new Map();
+    for (const rec of list) {
+      const name = rec.parent || "(no parent)";
+      parentCounts.set(name, (parentCounts.get(name) || 0) + 1);
+    }
+    for (const [label, count] of parentCounts) parents.push({ label, count });
+    const groups = [];
+    for (const rec of list) {
+      let loc = groups.find((item) => item.name === rec.location);
+      if (!loc) {
+        loc = { name: rec.location, parents: [] };
+        groups.push(loc);
+      }
+      let parent = loc.parents.find((item) => item.name === rec.parent);
+      if (!parent) {
+        parent = { name: rec.parent, rows: [] };
+        loc.parents.push(parent);
+      }
+      parent.rows.push(rec);
+    }
+    const grouped = groups
+      .map((loc) => {
+        const locCount = loc.parents.reduce((sum, parent) => sum + parent.rows.length, 0);
+        const locAlert = loc.parents.reduce(
+          (sum, parent) => sum + parent.rows.filter((row) => row.status === "Alert").length,
+          0
+        );
+        const parentsHtml = loc.parents
+          .map((parent) => {
+            const alert = parent.rows.filter((row) => row.status === "Alert").length;
+            const lines = parent.rows
+              .map((row) => {
+                const units = row.units ? `${escapeHtml(row.units)} units` : "";
+                return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(row.container)}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
+              })
+              .join("");
+            return `<div class="dash-parent">${escapeHtml(parent.name)} · ${parent.rows.length} containers · ${alert} alert</div>${lines}`;
+          })
+          .join("");
+        return `<div class="dash-loc">${escapeHtml(loc.name)} · ${locCount} containers · ${locAlert} alert</div>${parentsHtml}`;
+      })
+      .join("");
+    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-charts"><div class="dash-pie">${pieChart(slices)}</div><div class="dash-legend">${legend}</div></div><div class="dash-section">BY LOCATION</div>${barChart(byLocation, "")}<div class="dash-section">BY PARENT</div>${barChart(parents, "parent")}<div class="dash-section">CONTAINERS</div>${grouped}`;
   }
 
   function splitIdType(raw) {
@@ -1001,6 +1328,13 @@
     return n - 1;
   }
 
+  function fillStyleIndex(value) {
+    if (value === "Alert") return 1;
+    if (value === "Caution") return 2;
+    if (value === "Good") return 3;
+    return 0;
+  }
+
   function sheetXml(rows) {
     const body = rows
       .map((row, rowIndex) => {
@@ -1008,7 +1342,9 @@
           .map((value, col) => {
             if (value == null || value === "") return "";
             const ref = `${colLetters(col)}${rowIndex + 1}`;
-            return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+            const style = fillStyleIndex(value);
+            const painted = style ? ` s="${style}"` : "";
+            return `<c r="${ref}"${painted} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
           })
           .join("");
         return `<row r="${rowIndex + 1}">${cells}</row>`;
@@ -1066,7 +1402,7 @@
       {
         name: "xl/styles.xml",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf xfId="0"/></cellXfs></styleSheet>`,
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FF111111"/><name val="Calibri"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFB42318"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF5C518"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0D7A3F"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="1" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>`,
       },
       ...sheetFiles,
     ];
@@ -1398,26 +1734,29 @@
     sosCache.day = dayStamp();
     sosCache.name = name;
     sosCache.book = book;
+    sosCache.records = recordsFromBook(book);
   }
 
-  async function appendSosRows(newRows, alias, location) {
+  function dashboardBook(records) {
+    return { sheets: [{ name: "Dashboard", rows: dashboardSheetRows(records) }] };
+  }
+
+  async function appendSosRows(record, alias, location) {
     await ensureSosCache(alias);
-    const sheet = ensureSheet(sosCache.book, location);
-    const before = sheet.rows.length;
-    sheet.rows.push(...newRows);
-    rebuildTotal(sosCache.book);
+    const before = sosCache.records.length;
+    const previous = sosCache.book;
+    sosCache.records.push(record);
+    sosCache.book = dashboardBook(sosCache.records);
     try {
       await writeSosFile(sosCache.name, workbookBytes(sosCache.book));
     } catch (err) {
-      sheet.rows.splice(before);
-      if (before === 1 && sheet.rows.length === 1 && sheet.rows[0][0] === "Container ID") {
-        sosCache.book.sheets = sosCache.book.sheets.filter((item) => item !== sheet);
-      }
-      rebuildTotal(sosCache.book);
+      sosCache.records.splice(before);
+      sosCache.book = previous;
       fileOk = false;
-      err.rows = newRows;
+      err.record = record;
+      err.rows = [[record.container]];
       err.alias = alias;
-      err.location = location;
+      err.location = location || record.location;
       if (!err.fileName) err.fileName = sosCache.name;
       throw err;
     }
@@ -1425,8 +1764,8 @@
       alias,
       day: dayStamp(),
       name: sosCache.name,
-      count: sheetRowCount(sosCache.book),
-      location: sheet.name,
+      count: sosCache.records.length,
+      location: record.location,
       t: Date.now(),
     };
     GM_setValue(KEYS.session, session);
@@ -1479,7 +1818,7 @@
   }
 
   function saveHistory(alias, rows) {
-    GM_setValue(KEYS.history, { day: dayStamp(), alias, rows: rows.slice(0, 400), t: Date.now() });
+    GM_setValue(KEYS.history, { day: dayStamp(), alias, rows: rows.slice(0, 800), t: Date.now() });
   }
 
   function uiPixelRatio() {
@@ -1568,6 +1907,7 @@
         alias: sosCache.alias,
         day: sosCache.day,
         name: sosCache.name,
+        records: (sosCache.records || []).length,
         sheets: (sosCache.book?.sheets || []).map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })),
       },
       queued: scanQueueLen,
@@ -1806,6 +2146,93 @@
         }
         .status.found { background: #e8f6ec; border-color: #0b6b2f; }
         .status.missing, .status.error { background: #fff4f4; border-color: #b42318; }
+        #dashboard { font-weight: 800; }
+        .dash {
+          display: none;
+          position: fixed;
+          inset: 0;
+          z-index: 35;
+          overflow: auto;
+          pointer-events: auto;
+          background: rgba(17, 17, 17, 0.45);
+        }
+        .dash.open { display: block; }
+        .dash-card {
+          width: min(980px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)));
+          margin: 12px auto;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          padding: 14px;
+          background: #ffffff;
+          color: #111111;
+          border: 3px solid #111111;
+          border-radius: 12px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
+        }
+        .dash-bar {
+          display: flex; align-items: center; gap: 8px;
+          position: sticky; top: 0; z-index: 1;
+          background: #ffffff; padding-bottom: 8px;
+        }
+        .dash-title { flex: 1 1 auto; font-size: 22px; font-weight: 900; }
+        .dash-who { font-size: 13px; font-weight: 800; }
+        .dash-totals { display: flex; flex-wrap: wrap; gap: 8px; }
+        .dash-totals div {
+          min-width: 72px;
+          border: 1px solid #111111;
+          border-radius: 8px;
+          padding: 6px 8px;
+        }
+        .dash-totals b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+        .dash-totals span { font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+        .dash-charts { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+        .dash-pie { flex: 0 0 180px; }
+        .dash-pie svg { width: 180px; height: 180px; display: block; }
+        .dash-legend { flex: 1 1 180px; display: grid; gap: 6px; }
+        .dash-key { display: flex; align-items: center; gap: 8px; font-weight: 800; }
+        .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #111111; }
+        .dash-section { font-size: 12px; font-weight: 800; letter-spacing: .08em; }
+        .barrow {
+          display: grid;
+          grid-template-columns: minmax(90px, 180px) minmax(40px, 1fr) 36px;
+          gap: 8px;
+          align-items: center;
+          margin: 4px 0;
+        }
+        .barlabel { font-size: 12px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .bartrack { height: 14px; background: #eef1f5; border-radius: 999px; overflow: hidden; }
+        .barfill { height: 100%; background: #111111; border-radius: 999px; min-width: 2px; }
+        .barfill.parent { background: #1f4b99; }
+        .barcount { font-size: 12px; font-weight: 800; text-align: right; font-variant-numeric: tabular-nums; }
+        .dash-loc { margin-top: 10px; font-size: 14px; font-weight: 900; }
+        .dash-parent { margin: 6px 0 2px 8px; font-size: 13px; font-weight: 800; }
+        button.dash-line {
+          display: flex;
+          gap: 8px;
+          width: 100%;
+          box-sizing: border-box;
+          padding-left: 16px;
+          text-align: left;
+          border: 0;
+          border-bottom: 1px solid #eef1f5;
+          border-radius: 0;
+          background: #ffffff;
+          font-weight: 700;
+        }
+        .tag {
+          margin-left: auto;
+          border-radius: 999px;
+          padding: 1px 8px;
+          font-size: 11px;
+          font-weight: 800;
+        }
+        .tag-alert { background: #b42318; color: #ffffff; }
+        .tag-caution { background: #f5c518; color: #111111; }
+        .tag-good { background: #0d7a3f; color: #ffffff; }
+        .tag-miss { background: #fdeceb; color: #b42318; }
+        .tag-err { background: #fff4e5; color: #b54708; }
+        .tag-none { background: #eef1f5; color: #111111; }
         .locprompt, .dbg, .sharebox, .excelock, .accessdeny {
           display: none;
           position: fixed;
@@ -1946,6 +2373,7 @@
             </div>
             <div class="counts" id="counts"></div>
                 <div class="clock" id="clock">00:00:00</div>
+            <button id="dashboard" type="button" title="Charts for today's scans">Dashboard</button>
             <button id="share" type="button" title="Share the Tampermonkey install link">Share</button>
             <button id="debug" title="Copy debug JSON">Debug</button>
             <select id="panelSize" title="Panel size. Screen matches your display. +25% and +50% make this panel bigger.">
@@ -2065,6 +2493,15 @@
           <div id="accessMsg">This box stays here until the save works. RETRY is the only way to close it.</div>
           <button id="accessOpen" type="button">OPEN THE FOLDER</button>
           <button id="accessRetry" type="button">RETRY</button>
+        </div>
+      </div>
+      <div class="dash" id="dash">
+        <div class="dash-card">
+          <div class="dash-bar">
+            <div class="dash-title">Dashboard</div>
+            <button id="dashClose" type="button">Close</button>
+          </div>
+          <div id="dashBody"></div>
         </div>
       </div>
       <div class="locprompt" id="locprompt">
@@ -2187,9 +2624,7 @@
     }
 
     function holdAccessDenied(err) {
-      if (Array.isArray(err?.rows) && err.rows.length) {
-        heldSaves.push({ rows: err.rows, alias: err.alias, location: err.location });
-      }
+      rememberHeldSave(err);
       showAccessDenied(accessDeniedOpen);
     }
 
@@ -2200,10 +2635,23 @@
       shadow.getElementById("excelockRetry").disabled = false;
     }
 
-    function holdLockedSave(err) {
+    function rememberHeldSave(err) {
+      if (err?.record) {
+        heldSaves.push({
+          record: err.record,
+          rows: [[err.record.container]],
+          alias: err.alias,
+          location: err.location || err.record.location,
+        });
+        return;
+      }
       if (Array.isArray(err?.rows) && err.rows.length) {
         heldSaves.push({ rows: err.rows, alias: err.alias, location: err.location });
       }
+    }
+
+    function holdLockedSave(err) {
+      rememberHeldSave(err);
       const already = excelLockOpen && shadow.getElementById("excelock").classList.contains("open");
       if (already) {
         setOpen(true);
@@ -2253,7 +2701,9 @@
         ? enqueueSave(async () => {
             for (let i = 0; i < jobs.length; i++) {
               try {
-                await appendSosRows(jobs[i].rows, jobs[i].alias, jobs[i].location);
+                const record = jobs[i].record;
+                if (!record) throw new Error("This scan could not be retried. Scan it again.");
+                await appendSosRows(record, jobs[i].alias, jobs[i].location || record.location);
               } catch (err) {
                 err.remaining = jobs.slice(i);
                 throw err;
@@ -2435,7 +2885,7 @@
       if (today && fileOk) {
         const where = selectedLocation ? ` · ${escapeHtml(selectedLocation)}` : "";
         shadow.getElementById("footMsg").innerHTML =
-          `<b>${escapeHtml(ses.name)}</b> · ${ses.count} rows${where}`;
+          `<b>${escapeHtml(ses.name)}</b> · ${ses.count} containers${where}`;
       } else {
         shadow.getElementById("footMsg").textContent = "File saves on the first scan. Keep it closed in Excel.";
       }
@@ -2687,6 +3137,51 @@
       else shareStatus.textContent = "Copy failed. Click the link above, press Ctrl+A, then press Ctrl+C. Then paste it in Chime.";
     }
 
+    function paintDashboard() {
+      const panel = shadow.getElementById("dash");
+      if (!panel.classList.contains("open")) return;
+      const saved =
+        sosCache.day === dayStamp() && sosCache.alias === (alias || "") ? sosCache.records || [] : [];
+      const local = recent.slice().reverse().map(historyRecord);
+      const records = mergeRecords(saved, local);
+      shadow.getElementById("dashBody").innerHTML = dashboardHtml(records, alias || "");
+    }
+
+    async function openDashboard() {
+      const panel = shadow.getElementById("dash");
+      panel.classList.add("open");
+      shadow.getElementById("dashBody").innerHTML = `<div class="empty">Loading today's scans…</div>`;
+      const prevError = lastError;
+      try {
+        const who = alias || (await currentAlias());
+        alias = who;
+        shadow.getElementById("opTitle").textContent = who;
+        await ensureSosCache(who);
+      } catch {
+        /* Today's scans on this computer still show if the file cannot be read. */
+      }
+      lastError = prevError;
+      paintDashboard();
+    }
+
+    function closeDashboard() {
+      shadow.getElementById("dash").classList.remove("open");
+      focusScanBox();
+    }
+
+    shadow.getElementById("dashboard").addEventListener("click", () => {
+      openDashboard().catch(() => paintDashboard());
+    });
+    shadow.getElementById("dashClose").addEventListener("click", () => closeDashboard());
+    shadow.getElementById("dashBody").addEventListener("click", (event) => {
+      const line = event.target.closest("[data-container]");
+      if (!line) return;
+      const id = line.getAttribute("data-container") || "";
+      const found = recent.find((item) => idsMatch(item.id, id));
+      if (found?.result) showTicket(found.id, found.result);
+      closeDashboard();
+    });
+
     shadow.getElementById("share").addEventListener("click", () => {
       shareStatus.textContent = "";
       sharePanel.classList.add("open");
@@ -2838,12 +3333,15 @@
         const stored = { ...result };
         delete stored.raw;
         selectedId = id;
+        const record = scanRecord(id, result, location);
         recent.unshift({
           t: nowIso(),
           id,
           age: result.oldestAge || "",
           sku,
           status,
+          location,
+          record,
           result: stored,
         });
         persist();
@@ -2851,6 +3349,7 @@
         flashPanel();
         renderStats();
         renderHistory();
+        paintDashboard();
         const extra = scanQueue.length ? ` · ${scanQueue.length} queued` : "";
         setBanner(
           result.ok ? "found" : result.error === "NOT_FOUND" ? "missing" : "error",
@@ -2858,13 +3357,13 @@
             ? `<strong>SAVING</strong> ${escapeHtml(id)} · ${escapeHtml(location)}${extra}`
             : `<strong>${result.error === "NOT_FOUND" ? "NO RECORD FOUND" : escapeHtml(status)}</strong> ${escapeHtml(id)} · ${escapeHtml(location)}${extra}`
         );
-        const rows = rowsFromResult(id, result, who);
-        enqueueSave(() => appendSosRows(rows, who, location))
+        enqueueSave(() => appendSosRows(record, who, location))
           .then((session) => {
             spOk = true;
             fileOk = true;
             lastError = "";
             tick();
+            paintDashboard();
             if (working || !idsMatch(selectedId, id)) return;
             setBanner(
               result.ok ? "found" : result.error === "NOT_FOUND" ? "missing" : "error",
@@ -2881,8 +3380,9 @@
               return;
             }
             if (err?.code === "ACCESS_DENIED" || isAccessDenied(0, err?.message)) {
-              if (!err.rows) {
-                err.rows = rows;
+              if (!err.record) {
+                err.record = record;
+                err.rows = [[record.container]];
                 err.alias = who;
                 err.location = location;
               }
