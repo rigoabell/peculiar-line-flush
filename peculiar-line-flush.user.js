@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.24
+// @version      2.9.25
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -32,7 +32,7 @@
   Each operator scans in the panel. Each person gets their own daily file in:
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
-  The file matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time.
+  The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet.
 
   1. Install from the GitHub raw link. Do not paste this file into Tampermonkey.
   2. Open AFT Aging Inventory MEM3, finish Midway, leave that tab open.
@@ -45,7 +45,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.24";
+  const VERSION = "2.9.25";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -491,29 +491,46 @@
     return records;
   }
 
-  function recordsFromBook(book) {
-    for (const sheet of book?.sheets || []) {
-      const rows = sheet.rows || [];
-      const start = rows.findIndex((row) => row[0] === "Location" && row[1] === "Parent" && row[2] === "Container");
-      if (start < 0) continue;
-      const header = rows[start];
-      const scannedCol = header.findIndex((cell) => cellText(cell) === "Scanned At");
-      const records = [];
-      for (const row of rows.slice(start + 1)) {
-        const container = cellText(row[2]);
-        if (!container) continue;
-        records.push({
-          location: cellText(row[0]) || "Unknown",
-          parent: cellText(row[1]) || "(no parent)",
-          container,
-          age: cellText(row[3]),
-          status: cellText(row[4]) || "Error",
-          units: cellText(row[5]),
-          scannedAt: scannedCol >= 0 ? cellText(row[scannedCol]) : "",
-        });
-      }
-      return records;
+  function recordsFromDetailSheet(sheet) {
+    const rows = sheet?.rows || [];
+    const start = rows.findIndex((row) => row[0] === "Location" && row[1] === "Parent" && row[2] === "Container");
+    if (start < 0) return null;
+    const header = rows[start];
+    const scannedCol = header.findIndex((cell) => cellText(cell) === "Scanned At");
+    const records = [];
+    for (const row of rows.slice(start + 1)) {
+      const container = cellText(row[2]);
+      if (!container) continue;
+      records.push({
+        location: cellText(row[0]) || "Unknown",
+        parent: cellText(row[1]) || "(no parent)",
+        container,
+        age: cellText(row[3]),
+        status: cellText(row[4]) || "Error",
+        units: cellText(row[5]),
+        scannedAt: scannedCol >= 0 ? cellText(row[scannedCol]) : "",
+      });
     }
+    return records;
+  }
+
+  function recordsFromBook(book) {
+    const sheets = book?.sheets || [];
+    const dashboard = sheets.find((sheet) => String(sheet.name || "").toLowerCase() === "dashboard");
+    if (dashboard) {
+      const records = recordsFromDetailSheet(dashboard);
+      if (records) return records;
+    }
+    const combined = [];
+    let found = false;
+    for (const sheet of sheets) {
+      if (String(sheet.name || "").toLowerCase() === "dashboard") continue;
+      const records = recordsFromDetailSheet(sheet);
+      if (!records) continue;
+      found = true;
+      combined.push(...records);
+    }
+    if (found) return combined;
     return recordsFromLegacy(book);
   }
 
@@ -1815,8 +1832,44 @@
     sosCache.records = recordsFromBook(book);
   }
 
+  function locationSheetName(raw, used) {
+    let base = normalizeLocation(raw) || "Unknown";
+    if (base.toLowerCase() === "dashboard") base = "Dashboard location";
+    base = base.slice(0, 31);
+    let name = base;
+    let n = 2;
+    while (used.has(name.toLowerCase())) {
+      const suffix = " " + n;
+      name = base.slice(0, Math.max(1, 31 - suffix.length)) + suffix;
+      n += 1;
+    }
+    used.add(name.toLowerCase());
+    return name;
+  }
+
+  function locationSheetRows(records) {
+    const rows = [["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At"]];
+    for (const rec of records) {
+      rows.push([rec.location, rec.parent, rec.container, rec.age, rec.status, rec.units, rec.scannedAt || ""]);
+    }
+    return rows;
+  }
+
   function dashboardBook(records) {
-    return { sheets: [{ name: "Dashboard", rows: dashboardSheetRows(records) }] };
+    const list = records || [];
+    const sheets = [{ name: "Dashboard", rows: dashboardSheetRows(list) }];
+    const groups = new Map();
+    for (const rec of list) {
+      const key = normalizeLocation(rec.location) || "Unknown";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(rec);
+    }
+    const used = new Set(["dashboard"]);
+    const names = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    for (const name of names) {
+      sheets.push({ name: locationSheetName(name, used), rows: locationSheetRows(groups.get(name)) });
+    }
+    return { sheets };
   }
 
   async function appendSosRows(record, alias, location) {
