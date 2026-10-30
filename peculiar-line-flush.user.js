@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.23
+// @version      2.9.24
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -32,7 +32,7 @@
   Each operator scans in the panel. Each person gets their own daily file in:
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
-  The file matches the Dashboard screen: totals, each location, then each container with its parent, age, and status.
+  The file matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time.
 
   1. Install from the GitHub raw link. Do not paste this file into Tampermonkey.
   2. Open AFT Aging Inventory MEM3, finish Midway, leave that tab open.
@@ -45,7 +45,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.23";
+  const VERSION = "2.9.24";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -345,7 +345,7 @@
     return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
   }
 
-  function scanRecord(containerId, result, location) {
+  function scanRecord(containerId, result, location, scannedAt) {
     const notFound = result?.error === "NOT_FOUND" || result?.error === "NOT FOUND";
     const ok = Boolean(result?.ok) && !notFound;
     let status = "Error";
@@ -358,11 +358,15 @@
       age: ok ? cellText(result?.oldestAge) : "",
       status,
       units: ok ? cellText(result?.totalUnits) : "",
+      scannedAt: cellText(scannedAt),
     };
   }
 
   function historyRecord(row) {
-    if (row?.record?.container) return row.record;
+    if (row?.record?.container) {
+      if (row.record.scannedAt || !row.t) return row.record;
+      return { ...row.record, scannedAt: cellText(row.t) };
+    }
     const result = row?.result || {};
     const notFound = result.error === "NOT_FOUND" || row?.status === "NOT FOUND" || row?.status === "NOT_FOUND";
     const ok = !notFound && (result.ok === true || row?.status === "OK");
@@ -376,7 +380,8 @@
         parentContainer: result.parentContainer || "",
         totalUnits: result.totalUnits || "",
       },
-      row?.location || ""
+      row?.location || "",
+      row?.t || ""
     );
   }
 
@@ -437,9 +442,17 @@
     ];
     for (const loc of summary.locations) rows.push(tallyCells(loc.name, loc));
     rows.push([]);
-    rows.push(["Location", "Parent", "Container", "Age", "Status", "Units"]);
+    rows.push(["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At"]);
     for (const rec of records || []) {
-      rows.push([rec.location, rec.parent, rec.container, rec.age, rec.status, rec.units]);
+      rows.push([
+        rec.location,
+        rec.parent,
+        rec.container,
+        rec.age,
+        rec.status,
+        rec.units,
+        rec.scannedAt || "",
+      ]);
     }
     return rows;
   }
@@ -456,6 +469,7 @@
       const ageCol = col("Oldest Units Age");
       const parentCol = col("Parent Container");
       const statusCol = col("Status");
+      const timeCol = col("Scanned At");
       for (const row of sheet.rows.slice(1)) {
         const container = cellText(row[idCol]);
         const rawStatus = cellText(row[statusCol]);
@@ -470,6 +484,7 @@
           age: rawStatus === "OK" ? cellText(row[ageCol]) : "",
           status,
           units: rawStatus === "OK" ? cellText(row[unitCol]) : "",
+          scannedAt: timeCol >= 0 ? cellText(row[timeCol]) : "",
         });
       }
     }
@@ -481,6 +496,8 @@
       const rows = sheet.rows || [];
       const start = rows.findIndex((row) => row[0] === "Location" && row[1] === "Parent" && row[2] === "Container");
       if (start < 0) continue;
+      const header = rows[start];
+      const scannedCol = header.findIndex((cell) => cellText(cell) === "Scanned At");
       const records = [];
       for (const row of rows.slice(start + 1)) {
         const container = cellText(row[2]);
@@ -492,6 +509,7 @@
           age: cellText(row[3]),
           status: cellText(row[4]) || "Error",
           units: cellText(row[5]),
+          scannedAt: scannedCol >= 0 ? cellText(row[scannedCol]) : "",
         });
       }
       return records;
@@ -499,7 +517,7 @@
     return recordsFromLegacy(book);
   }
 
-  function sameDashboardRecord(a, b) {
+  function sameScanBody(a, b) {
     const locOk = a.location === b.location || a.location === "Unknown" || b.location === "Unknown";
     return (
       locOk &&
@@ -512,14 +530,58 @@
   }
 
   function mergeRecords(fileRecords, localRecords) {
-    const pool = (fileRecords || []).map((rec) => ({ rec, used: false }));
-    const extras = [];
-    for (const local of localRecords || []) {
-      const hit = pool.find((item) => !item.used && sameDashboardRecord(item.rec, local));
-      if (hit) hit.used = true;
-      else extras.push(local);
+    const next = (fileRecords || []).map((rec) => ({ ...rec }));
+    const usedFile = new Set();
+    const usedLocal = new Set();
+    const locals = localRecords || [];
+    const takeFile = (pred) => next.findIndex((rec, i) => !usedFile.has(i) && pred(rec));
+
+    for (let i = 0; i < locals.length; i++) {
+      const local = locals[i];
+      if (!local?.scannedAt) continue;
+      const idx = takeFile((rec) => rec.scannedAt === local.scannedAt && sameScanBody(rec, local));
+      if (idx < 0) continue;
+      usedFile.add(idx);
+      usedLocal.add(i);
     }
-    return [...(fileRecords || []), ...extras];
+
+    for (let i = 0; i < locals.length; i++) {
+      if (usedLocal.has(i)) continue;
+      const local = locals[i];
+      const idx = takeFile((rec) => !rec.scannedAt && sameScanBody(rec, local));
+      if (idx < 0) continue;
+      if (local?.scannedAt) next[idx].scannedAt = local.scannedAt;
+      usedFile.add(idx);
+      usedLocal.add(i);
+    }
+
+    const extras = [];
+    for (let i = 0; i < locals.length; i++) {
+      if (!usedLocal.has(i)) extras.push(locals[i]);
+    }
+    return next.concat(extras);
+  }
+
+  function fileRecordsWithScanTimes(records, history, pending) {
+    const locals = [];
+    let skippedPending = false;
+    const chronological = history || [];
+    for (let i = chronological.length - 1; i >= 0; i--) {
+      const local = chronological[i];
+      if (!local?.scannedAt) continue;
+      if (
+        !skippedPending &&
+        pending?.scannedAt &&
+        local.scannedAt === pending.scannedAt &&
+        sameScanBody(local, pending)
+      ) {
+        skippedPending = true;
+        continue;
+      }
+      locals.push(local);
+    }
+    locals.reverse();
+    return mergeRecords(records, locals).slice(0, (records || []).length);
   }
 
   function statusClass(status) {
@@ -650,7 +712,8 @@
             const lines = parent.rows
               .map((row) => {
                 const units = row.units ? `${escapeHtml(row.units)} units` : "";
-                return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(row.container)}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
+                const when = cellText(row.scannedAt).slice(11, 19);
+                return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(row.container)}</span><span>${escapeHtml(when || "—")}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
               })
               .join("");
             return `<div class="dash-parent">${escapeHtml(parent.name)} · ${parent.rows.length} containers · ${alert} alert</div>${lines}`;
@@ -1758,14 +1821,16 @@
 
   async function appendSosRows(record, alias, location) {
     await ensureSosCache(alias);
-    const before = sosCache.records.length;
+    const snapshot = sosCache.records.map((rec) => ({ ...rec }));
     const previous = sosCache.book;
+    const history = recent.slice().reverse().map(historyRecord);
+    sosCache.records = fileRecordsWithScanTimes(sosCache.records, history, record);
     sosCache.records.push(record);
     sosCache.book = dashboardBook(sosCache.records);
     try {
       await writeSosFile(sosCache.name, workbookBytes(sosCache.book));
     } catch (err) {
-      sosCache.records.splice(before);
+      sosCache.records = snapshot;
       sosCache.book = previous;
       fileOk = false;
       err.record = record;
@@ -3383,9 +3448,10 @@
         const stored = { ...result };
         delete stored.raw;
         selectedId = id;
-        const record = scanRecord(id, result, location);
+        const scannedAt = nowIso();
+        const record = scanRecord(id, result, location, scannedAt);
         recent.unshift({
-          t: nowIso(),
+          t: scannedAt,
           id,
           age: result.oldestAge || "",
           sku,
