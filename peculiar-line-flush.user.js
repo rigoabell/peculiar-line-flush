@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.25
+// @version      2.9.29
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update one shared daily workbook grouped by EOL and dropzone. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -32,7 +32,8 @@
   Each operator scans in the panel. Each person gets their own daily file in:
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
-  The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet.
+  The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
+  EOL scans (EOL 1–6, AR EOL, BIGs EOL) are also copied into LineFlush_EOL_YYYY-MM-DD.xlsx. That file has one Summary sheet and one sheet per person. The summary is split at 12:30 PM and shows each EOL’s dropzone mix.
 
   1. Install from the GitHub raw link. Do not paste this file into Tampermonkey.
   2. Open AFT Aging Inventory MEM3, finish Midway, leave that tab open.
@@ -45,7 +46,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.25";
+  const VERSION = "2.9.29";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -98,6 +99,8 @@
     "EOL 5",
     "EOL 6",
   ];
+  const EOL_LOCATIONS = ["EOL 1", "EOL 2", "EOL 3", "EOL 4", "EOL 5", "EOL 6", "AR EOL", "BIGs EOL"];
+  const EOL_LUNCH = "12:30:00";
   const OTHER_LOCATION = "__other__";
   const HEADERS = [
     "Container ID",
@@ -315,7 +318,7 @@
       bg,
       fg: contrastInk(bg),
       border: `hsl(${h}, ${s}%, ${Math.max(18, l - 14)}%)`,
-      label: age >= 5 ? "ALERT" : age >= 2 ? "CAUTION" : "GOOD",
+      label: age >= 5 ? "ALERT" : age >= 3 ? "CAUTION" : "GOOD",
       pct: Math.max(2, Math.min(100, (Math.min(age, 5) / 5) * 100)),
     };
   }
@@ -672,74 +675,20 @@
     if (!list.length) {
       return `<div class="dash-who">${escapeHtml(whoLine)}</div><div class="empty">No scans yet today.</div>`;
     }
-    const slices = [
-      { name: "Alert", count: summary.alert, color: DASH_COLORS.Alert },
-      { name: "Caution", count: summary.caution, color: DASH_COLORS.Caution },
-      { name: "Good", count: summary.good, color: DASH_COLORS.Good },
-    ];
-    if (summary.noAge) slices.push({ name: "No age", count: summary.noAge, color: DASH_COLORS["No age"] });
-    const legend = slices
+    const locationRows = summary.locations
       .map(
-        (slice) =>
-          `<div class="dash-key"><span class="swatch" style="background:${slice.color}"></span><span>${escapeHtml(slice.name)}</span><b>${slice.count}</b></div>`
+        (loc) =>
+          `<div class="dash-loc">${escapeHtml(loc.name)} · ${loc.containers} containers · ${formatUnits(loc.units)} units · ${loc.alert} alert</div>`
       )
       .join("");
-    const locSlices = summary.locations.map((loc, index) => ({
-      name: loc.name,
-      count: loc.containers,
-      color: locationHue(index),
-    }));
-    const locLegend = locSlices
-      .map(
-        (slice) =>
-          `<div class="dash-key"><span class="swatch" style="background:${slice.color}"></span><span>${escapeHtml(slice.name)}</span><b>${slice.count}</b></div>`
-      )
-      .join("");
-    const parents = [];
-    const parentCounts = new Map();
-    for (const rec of list) {
-      const name = rec.parent || "(no parent)";
-      parentCounts.set(name, (parentCounts.get(name) || 0) + 1);
-    }
-    for (const [label, count] of parentCounts) parents.push({ label, count });
-    const groups = [];
-    for (const rec of list) {
-      let loc = groups.find((item) => item.name === rec.location);
-      if (!loc) {
-        loc = { name: rec.location, parents: [] };
-        groups.push(loc);
-      }
-      let parent = loc.parents.find((item) => item.name === rec.parent);
-      if (!parent) {
-        parent = { name: rec.parent, rows: [] };
-        loc.parents.push(parent);
-      }
-      parent.rows.push(rec);
-    }
-    const grouped = groups
-      .map((loc) => {
-        const locCount = loc.parents.reduce((sum, parent) => sum + parent.rows.length, 0);
-        const locAlert = loc.parents.reduce(
-          (sum, parent) => sum + parent.rows.filter((row) => row.status === "Alert").length,
-          0
-        );
-        const parentsHtml = loc.parents
-          .map((parent) => {
-            const alert = parent.rows.filter((row) => row.status === "Alert").length;
-            const lines = parent.rows
-              .map((row) => {
-                const units = row.units ? `${escapeHtml(row.units)} units` : "";
-                const when = cellText(row.scannedAt).slice(11, 19);
-                return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(row.container)}</span><span>${escapeHtml(when || "—")}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
-              })
-              .join("");
-            return `<div class="dash-parent">${escapeHtml(parent.name)} · ${parent.rows.length} containers · ${alert} alert</div>${lines}`;
-          })
-          .join("");
-        return `<div class="dash-loc">${escapeHtml(loc.name)} · ${locCount} containers · ${locAlert} alert</div>${parentsHtml}`;
+    const scans = list
+      .map((row) => {
+        const units = row.units ? `${escapeHtml(row.units)} units` : "";
+        const when = cellText(row.scannedAt).slice(11, 19);
+        return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(when || "—")}</span><span>${escapeHtml(row.location)}</span><span>${escapeHtml(row.container)}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
       })
       .join("");
-    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-equal"><section class="dash-pane"><div class="dash-section">AGE</div><div class="dash-charts"><div class="dash-pie">${pieChart(slices)}</div><div class="dash-legend">${legend}</div></div></section><section class="dash-pane"><div class="dash-section">LOCATION</div><div class="dash-charts"><div class="dash-pie">${pieChart(locSlices)}</div><div class="dash-legend">${locLegend}</div></div></section></div><div class="dash-rule"><div class="dash-section">BY PARENT</div>${barChart(parents, "parent")}</div><div class="dash-rule"><div class="dash-section">CONTAINERS</div>${grouped}</div>`;
+    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-rule"><div class="dash-section">LOCATIONS</div>${locationRows}</div><div class="dash-rule"><div class="dash-section">SCANS</div>${scans}</div>`;
   }
 
   function splitIdType(raw) {
@@ -1335,7 +1284,13 @@
     return out;
   }
 
-  function zipStore(files) {
+  async function deflateRaw(bytes) {
+    if (typeof CompressionStream !== "function") return null;
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async function zipStore(files) {
     const encoder = new TextEncoder();
     const locals = [];
     const centrals = [];
@@ -1344,13 +1299,20 @@
       const name = encoder.encode(file.name);
       const data = file.data instanceof Uint8Array ? file.data : encoder.encode(String(file.data));
       const crc = crc32(data);
+      let method = 0;
+      let stored = data;
+      const compressed = await deflateRaw(data);
+      if (compressed && compressed.length < data.length) {
+        method = 8;
+        stored = compressed;
+      }
       const local = new Uint8Array(30 + name.length);
       const localView = new DataView(local.buffer);
       u32(localView, 0, 0x04034b50);
       u16(localView, 4, 20);
-      u16(localView, 8, 0);
+      u16(localView, 8, method);
       u32(localView, 14, crc);
-      u32(localView, 18, data.length);
+      u32(localView, 18, stored.length);
       u32(localView, 22, data.length);
       u16(localView, 26, name.length);
       local.set(name, 30);
@@ -1359,15 +1321,16 @@
       u32(centralView, 0, 0x02014b50);
       u16(centralView, 4, 20);
       u16(centralView, 6, 20);
+      u16(centralView, 10, method);
       u32(centralView, 16, crc);
-      u32(centralView, 20, data.length);
+      u32(centralView, 20, stored.length);
       u32(centralView, 24, data.length);
       u16(centralView, 28, name.length);
       u32(centralView, 42, offset);
       central.set(name, 46);
-      locals.push(local, data);
+      locals.push(local, stored);
       centrals.push(central);
-      offset += local.length + data.length;
+      offset += local.length + stored.length;
     }
     const centralBytes = concatBytes(centrals);
     const end = new Uint8Array(22);
@@ -1430,30 +1393,84 @@
     return 0;
   }
 
-  function sheetXml(rows) {
-    const body = rows
-      .map((row, rowIndex) => {
-        const cells = row
-          .map((value, col) => {
-            if (value == null || value === "") return "";
-            const ref = `${colLetters(col)}${rowIndex + 1}`;
-            const style = fillStyleIndex(value);
-            const painted = style ? ` s="${style}"` : "";
-            return `<c r="${ref}"${painted} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
-          })
-          .join("");
-        return `<row r="${rowIndex + 1}">${cells}</row>`;
-      })
-      .join("");
-    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${body}</sheetData></worksheet>`;
+  function sharedStrings(sheets) {
+    const index = new Map();
+    const values = [];
+    let count = 0;
+    const idOf = (value) => {
+      const text = String(value);
+      let id = index.get(text);
+      if (id == null) {
+        id = values.length;
+        index.set(text, id);
+        values.push(text);
+      }
+      count += 1;
+      return id;
+    };
+    return { idOf, values, get count() { return count; } };
   }
 
-  function workbookBytes(book) {
+  function sharedStringsXml(table) {
+    const items = table.values
+      .map((value) => `<si><t xml:space="preserve">${xmlEscape(value)}</t></si>`)
+      .join("");
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${table.count}" uniqueCount="${table.values.length}">${items}</sst>`;
+  }
+
+  function rowStyle(kind, value) {
+    if (kind === "title") return 4;
+    if (kind === "header") return 5;
+    if (kind === "band0" || kind === "band1") {
+      const status = fillStyleIndex(value);
+      if (status) return status;
+      return kind === "band0" ? 6 : 7;
+    }
+    return fillStyleIndex(value);
+  }
+
+  function sheetXml(sheet, idOf) {
+    const rows = sheet.rows || [];
+    const kinds = sheet.kinds || [];
+    const body = rows
+      .map((row, rowIndex) => {
+        const kind = kinds[rowIndex] || "";
+        const cells = row
+          .map((value, col) => {
+            const style = rowStyle(kind, value);
+            const blank = value == null || value === "";
+            if (blank && !style) return "";
+            const ref = `${colLetters(col)}${rowIndex + 1}`;
+            const painted = style ? ` s="${style}"` : "";
+            if (blank) return `<c r="${ref}"${painted}/>`;
+            return `<c r="${ref}"${painted} t="s"><v>${idOf(value)}</v></c>`;
+          })
+          .join("");
+        const tall = kind === "title" ? ` ht="22" customHeight="1"` : "";
+        return `<row r="${rowIndex + 1}"${tall}>${cells}</row>`;
+      })
+      .join("");
+    const widths = sheet.widths || [];
+    const cols = widths.length
+      ? `<cols>${widths
+          .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
+          .join("")}</cols>`
+      : "";
+    const merges = sheet.merges || [];
+    const mergeXml = merges.length
+      ? `<mergeCells count="${merges.length}">${merges.map((ref) => `<mergeCell ref="${xmlEscape(ref)}"/>`).join("")}</mergeCells>`
+      : "";
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${cols}<sheetData>${body}</sheetData>${mergeXml}</worksheet>`;
+  }
+
+  async function workbookBytes(book) {
     const sheets = book.sheets.length ? book.sheets : [{ name: "Scans", rows: [HEADERS.slice()] }];
+    const strings = sharedStrings(sheets);
     const sheetFiles = sheets.map((sheet, index) => ({
       name: `xl/worksheets/sheet${index + 1}.xml`,
-      data: sheetXml(sheet.rows),
+      data: sheetXml(sheet, strings.idOf),
     }));
     const sheetTags = sheets
       .map(
@@ -1477,7 +1494,7 @@
       {
         name: "[Content_Types].xml",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${overrides}</Types>`,
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>${overrides}</Types>`,
       },
       {
         name: "_rels/.rels",
@@ -1492,16 +1509,20 @@
       {
         name: "xl/_rels/workbook.xml.rels",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheetRels}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheetRels}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>`,
       },
       {
         name: "xl/styles.xml",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FF111111"/><name val="Calibri"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFB42318"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF5C518"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0D7A3F"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="1" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>`,
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FF111111"/><name val="Calibri"/></font><font><b/><sz val="14"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts><fills count="9"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFB42318"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF5C518"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0D7A3F"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1B3A4B"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD6DCE4"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E8F5"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF4F1EA"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="8"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="1" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="3" fillId="5" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="2" fillId="6" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="7" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="8" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>`,
+      },
+      {
+        name: "xl/sharedStrings.xml",
+        data: sharedStringsXml(strings),
       },
       ...sheetFiles,
     ];
-    return zipStore(files);
+    return await zipStore(files);
   }
 
   async function inflateRaw(bytes) {
@@ -1722,7 +1743,39 @@
     return err;
   }
 
-  async function writeSosFile(name, bytes) {
+  function matchTag(etag) {
+    const s = String(etag || "").trim();
+    if (!s || s === "*") return "*";
+    return s.startsWith('"') ? s : `"${s}"`;
+  }
+
+  function writeFailure(name, status, text, quiet) {
+    if (excelFileIsOpen(status, text)) {
+      if (quiet) {
+        const err = new Error(`Excel has ${name} open.`);
+        err.code = "EOL_LOCK";
+        return err;
+      }
+      return fileLockError(name);
+    }
+    if (isAccessDenied(status, text)) {
+      if (quiet) {
+        const err = new Error(`Access denied. ${name} was not updated.`);
+        err.code = "EOL_PUBLISH";
+        return err;
+      }
+      return accessDeniedError(name);
+    }
+    const message = `${status} ${clip(text, 180)}`;
+    if (!quiet) lastError = message;
+    const err = new Error(quiet ? message : lastError);
+    if (status === 412) err.code = "CONFLICT";
+    else if (quiet) err.code = "EOL_PUBLISH";
+    return err;
+  }
+
+  async function writeSosFile(name, bytes, opts = {}) {
+    const quiet = Boolean(opts.quiet);
     const d = await digest();
     const url = `${SP_SITE}/_api/web/GetFolderByServerRelativeUrl(@p)/Files/add(url='${name.replace(
       /'/g,
@@ -1733,30 +1786,29 @@
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "X-RequestDigest": d,
     };
+    if (opts.etag) headers["If-Match"] = matchTag(opts.etag);
     const body = bytesToBinaryString(bytes);
     const send = () => gmReq(url, { method: "POST", headers, body, binary: true });
     const res = await send();
-    if (excelFileIsOpen(res.status, res.responseText)) throw fileLockError(name);
-    if (isAccessDenied(res.status, res.responseText)) throw accessDeniedError(name);
     if (res.status < 200 || res.status >= 300) {
-      if (/404|DirectoryNotFound|File Not Found/i.test(`${res.status} ${res.responseText || ""}`)) {
+      if (!opts.etag && /404|DirectoryNotFound|File Not Found/i.test(`${res.status} ${res.responseText || ""}`)) {
         await assertSosFolder();
         const retry = await send();
-        if (excelFileIsOpen(retry.status, retry.responseText)) throw fileLockError(name);
-        if (isAccessDenied(retry.status, retry.responseText)) throw accessDeniedError(name);
         if (retry.status >= 200 && retry.status < 300) {
-          lastError = "";
-          fileOk = true;
+          if (!quiet) {
+            lastError = "";
+            fileOk = true;
+          }
           return;
         }
-        lastError = `${retry.status} ${clip(retry.responseText, 180)}`;
-        throw new Error(lastError);
+        throw writeFailure(name, retry.status, retry.responseText, quiet);
       }
-      lastError = `${res.status} ${clip(res.responseText, 180)}`;
-      throw new Error(lastError);
+      throw writeFailure(name, res.status, res.responseText, quiet);
     }
-    lastError = "";
-    fileOk = true;
+    if (!quiet) {
+      lastError = "";
+      fileOk = true;
+    }
   }
 
   function rowsFromResult(containerId, result, alias) {
@@ -1872,6 +1924,218 @@
     return { sheets };
   }
 
+  function isEolLocation(location) {
+    const name = normalizeLocation(location).toLowerCase();
+    return EOL_LOCATIONS.some((item) => item.toLowerCase() === name);
+  }
+
+  function eolHalf(scannedAt) {
+    const text = cellText(scannedAt);
+    const time = text.length >= 19 ? text.slice(11, 19) : "";
+    if (!/^\d{2}:\d{2}:\d{2}$/.test(time)) return "first";
+    return time >= EOL_LUNCH ? "second" : "first";
+  }
+
+  function eolFileName() {
+    return `LineFlush_EOL_${dayStamp()}.xlsx`;
+  }
+
+  function percentShares(counts) {
+    const total = counts.reduce((sum, count) => sum + count, 0);
+    if (!total) return counts.map(() => 0);
+    const exact = counts.map((count) => (count * 100) / total);
+    const base = exact.map((value) => Math.floor(value));
+    let left = 100 - base.reduce((sum, value) => sum + value, 0);
+    const order = exact
+      .map((value, index) => ({ index, frac: value - base[index] }))
+      .sort((a, b) => b.frac - a.frac || a.index - b.index);
+    for (let i = 0; i < left; i++) base[order[i].index] += 1;
+    return base;
+  }
+
+  function eolRank(name) {
+    const idx = EOL_LOCATIONS.findIndex((item) => item.toLowerCase() === String(name || "").toLowerCase());
+    return idx < 0 ? EOL_LOCATIONS.length : idx;
+  }
+
+  function summarizeEolBlock(records) {
+    const groups = new Map();
+    for (const rec of records) {
+      const eol = normalizeLocation(rec.location) || "Unknown";
+      const drop = cellText(rec.parent) || "(no parent)";
+      if (!groups.has(eol)) groups.set(eol, new Map());
+      const drops = groups.get(eol);
+      if (!drops.has(drop)) drops.set(drop, { containers: 0, units: 0 });
+      const group = drops.get(drop);
+      group.containers += 1;
+      group.units += unitCount(rec.units);
+    }
+    const eols = [...groups.keys()].sort(
+      (a, b) => eolRank(a) - eolRank(b) || a.localeCompare(b, undefined, { sensitivity: "base" })
+    );
+    const lines = [];
+    for (const eol of eols) {
+      const drops = groups.get(eol);
+      const names = [...drops.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+      const counts = names.map((name) => drops.get(name).containers);
+      const pcts = percentShares(counts);
+      names.forEach((name, index) => {
+        const group = drops.get(name);
+        lines.push([eol, name, formatUnits(group.containers), formatUnits(group.units), `${pcts[index]}%`]);
+      });
+    }
+    return lines;
+  }
+
+  function eolSummarySheet(records) {
+    const first = [];
+    const second = [];
+    for (const rec of records || []) {
+      if (!isEolLocation(rec.location)) continue;
+      (eolHalf(rec.scannedAt) === "second" ? second : first).push(rec);
+    }
+    const rows = [];
+    const kinds = [];
+    const merges = [];
+    const pushSection = (title, list) => {
+      merges.push(`A${rows.length + 1}:E${rows.length + 1}`);
+      rows.push([title, "", "", "", ""]);
+      kinds.push("title");
+      rows.push(["EOL", "Dropzone", "Containers", "Units", "Percent"]);
+      kinds.push("header");
+      const lines = summarizeEolBlock(list);
+      if (!lines.length) {
+        rows.push(["No scans", "", "", "", ""]);
+        kinds.push("band0");
+        return;
+      }
+      let prev = "";
+      let band = 0;
+      for (const line of lines) {
+        if (prev && line[0] !== prev) {
+          rows.push(["", "", "", "", ""]);
+          kinds.push("");
+          band = band ? 0 : 1;
+        }
+        prev = line[0];
+        rows.push(line);
+        kinds.push(band ? "band1" : "band0");
+      }
+    };
+    pushSection("1st Half Summary  ·  before 12:30 PM", first);
+    rows.push(["", "", "", "", ""]);
+    kinds.push("");
+    pushSection("2nd Half Summary  ·  12:30 PM and after", second);
+    rows.push(["", "", "", "", ""]);
+    kinds.push("");
+    pushSection("All Day Summary", first.concat(second));
+    return { name: "Summary", rows, kinds, merges, widths: [16, 28, 14, 12, 12] };
+  }
+
+  function eolPersonName(alias, used) {
+    let base = normalizeLocation(alias) || "operator";
+    if (base.toLowerCase() === "summary") base = "operator";
+    return locationSheetName(base, used);
+  }
+
+  function eolWorkbook(people) {
+    const used = new Set(["summary"]);
+    const sorted = [...(people || [])].sort((a, b) =>
+      String(a.alias || "").localeCompare(String(b.alias || ""), undefined, { sensitivity: "base" })
+    );
+    const personSheets = [];
+    const all = [];
+    for (const person of sorted) {
+      const records = (person.records || []).filter((rec) => isEolLocation(rec.location));
+      if (!records.length) continue;
+      all.push(...records);
+      personSheets.push({ name: eolPersonName(person.alias, used), rows: locationSheetRows(records) });
+    }
+    return { sheets: [eolSummarySheet(all), ...personSheets] };
+  }
+
+  function peopleFromEolBook(book) {
+    const people = [];
+    for (const sheet of book?.sheets || []) {
+      if (String(sheet.name || "").toLowerCase() === "summary") continue;
+      const records = recordsFromDetailSheet(sheet);
+      if (!records) continue;
+      people.push({ alias: sheet.name, records });
+    }
+    return people;
+  }
+
+  function eolSheetMatches(people, alias, records) {
+    const mine = (records || []).filter((rec) => isEolLocation(rec.location));
+    const sheet = (people || []).find((person) => String(person.alias || "").toLowerCase() === String(alias || "").toLowerCase());
+    if (!sheet) return mine.length === 0;
+    if (sheet.records.length !== mine.length) return false;
+    const key = (rec) => [rec.location, rec.parent, rec.container, rec.scannedAt].join("\u0001");
+    const got = sheet.records.map(key).sort();
+    const want = mine.map(key).sort();
+    return got.every((item, index) => item === want[index]);
+  }
+
+  async function fileEtag(path) {
+    const res = await gmReq(
+      `${SP_SITE}/_api/web/GetFileByServerRelativeUrl(@p)?$select=ETag&@p='${quotePath(path)}'`,
+      { headers: { Accept: "application/json;odata=nometadata" } }
+    );
+    if (res.status === 404) return null;
+    if (res.status < 200 || res.status >= 300) {
+      const err = new Error(`${res.status} ${clip(res.responseText, 180)}`);
+      err.code = "EOL_PUBLISH";
+      throw err;
+    }
+    let json = {};
+    try {
+      json = JSON.parse(res.responseText || "{}");
+    } catch {
+      json = {};
+    }
+    return json.ETag || json.d?.ETag || "*";
+  }
+
+  async function publishEolWorkbook(alias, records) {
+    const name = eolFileName();
+    const path = filePathFor(name);
+    let lastErr = null;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      if (attempt) await sleep(120 * attempt);
+      let etag = null;
+      let people = [];
+      try {
+        etag = await fileEtag(path);
+        if (etag) {
+          const bytes = await readSosBytes(path);
+          if (bytes && bytes.length) people = peopleFromEolBook(await workbookFromXlsx(bytes));
+        }
+      } catch (err) {
+        if (err?.code === "EOL_LOCK") throw err;
+        if (!/404/.test(String(err?.message || err))) throw err;
+      }
+      const merged = people.filter((person) => String(person.alias || "").toLowerCase() !== String(alias || "").toLowerCase());
+      merged.push({ alias, records });
+      try {
+        await writeSosFile(name, await workbookBytes(eolWorkbook(merged)), { etag: etag || "", quiet: true });
+      } catch (err) {
+        lastErr = err;
+        if (err?.code === "CONFLICT") continue;
+        throw err;
+      }
+      try {
+        const checkBytes = await readSosBytes(path);
+        const check = checkBytes && checkBytes.length ? peopleFromEolBook(await workbookFromXlsx(checkBytes)) : [];
+        if (eolSheetMatches(check, alias, records)) return name;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    const err = lastErr || new Error("EOL workbook was updated by someone else.");
+    if (!err.code) err.code = "EOL_PUBLISH";
+    throw err;
+  }
+
   async function appendSosRows(record, alias, location) {
     await ensureSosCache(alias);
     const snapshot = sosCache.records.map((rec) => ({ ...rec }));
@@ -1881,7 +2145,7 @@
     sosCache.records.push(record);
     sosCache.book = dashboardBook(sosCache.records);
     try {
-      await writeSosFile(sosCache.name, workbookBytes(sosCache.book));
+      await writeSosFile(sosCache.name, await workbookBytes(sosCache.book));
     } catch (err) {
       sosCache.records = snapshot;
       sosCache.book = previous;
@@ -1893,12 +2157,24 @@
       if (!err.fileName) err.fileName = sosCache.name;
       throw err;
     }
+    let eolNote = "";
+    if (isEolLocation(record.location)) {
+      try {
+        await publishEolWorkbook(alias, sosCache.records);
+      } catch (err) {
+        eolNote =
+          err?.code === "EOL_LOCK"
+            ? "Your file saved. The EOL workbook is open in Excel."
+            : "Your file saved. The EOL workbook did not update.";
+      }
+    }
     const session = {
       alias,
       day: dayStamp(),
       name: sosCache.name,
       count: sosCache.records.length,
       location: record.location,
+      eolNote,
       t: Date.now(),
     };
     GM_setValue(KEYS.session, session);
@@ -2109,7 +2385,7 @@
           display: flex; align-items: center; justify-content: center;
           pointer-events: none;
         }
-        .backdrop { position: absolute; inset: 0; background: rgba(4, 8, 12, .45); pointer-events: none; }
+        .backdrop { position: absolute; inset: 0; background: #e7e9ee; pointer-events: none; }
         .modal {
           position: relative; z-index: 1;
           pointer-events: auto;
@@ -2294,7 +2570,7 @@
           z-index: 35;
           overflow: auto;
           pointer-events: auto;
-          background: rgba(17, 17, 17, 0.45);
+          background: #e7e9ee;
         }
         .dash.open { display: block; }
         .dash-card {
@@ -2822,7 +3098,7 @@
       await assertSosFolder();
       await ensureSosCache(who);
       if (sosCache.book && sosCache.name) {
-        await writeSosFile(sosCache.name, workbookBytes(sosCache.book));
+        await writeSosFile(sosCache.name, await workbookBytes(sosCache.book));
       }
       spOk = true;
       fileOk = true;
@@ -3086,6 +3362,7 @@
       if (!on && (excelLockOpen || accessDeniedOpen)) return;
       open = on;
       hostEl.classList.toggle("closed", !on);
+      hostEl.style.setProperty("background", on ? "#e7e9ee" : "transparent", "important");
       GM_setValue(KEYS.panelOpen, !!on);
       document.documentElement.style.overflow = "";
       if (on) setTimeout(focusScanBox, 50);
@@ -3534,10 +3811,11 @@
             tick();
             paintDashboard();
             if (working || !idsMatch(selectedId, id)) return;
+            const eolNote = session?.eolNote ? `<div>${escapeHtml(session.eolNote)}</div>` : "";
             setBanner(
               result.ok ? "found" : result.error === "NOT_FOUND" ? "missing" : "error",
               result.ok
-                ? `<strong>SAVED</strong> ${escapeHtml(id)} · ${escapeHtml(location)}`
+                ? `<strong>SAVED</strong> ${escapeHtml(id)} · ${escapeHtml(location)}${eolNote}`
                 : `<strong>${result.error === "NOT_FOUND" ? "NO RECORD FOUND" : escapeHtml(status)}</strong> · ${escapeHtml(session.name)}`
             );
           })
