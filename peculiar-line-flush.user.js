@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.29
+// @version      2.9.30
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update one shared daily workbook grouped by EOL and dropzone. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -33,7 +33,7 @@
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
-  EOL scans (EOL 1–6, AR EOL, BIGs EOL) are also copied into LineFlush_EOL_YYYY-MM-DD.xlsx. That file has one Summary sheet and one sheet per person. The summary is split at 12:30 PM and shows each EOL’s dropzone mix.
+  EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
   1. Install from the GitHub raw link. Do not paste this file into Tampermonkey.
   2. Open AFT Aging Inventory MEM3, finish Midway, leave that tab open.
@@ -46,7 +46,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.29";
+  const VERSION = "2.9.30";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -100,7 +100,7 @@
     "EOL 6",
   ];
   const EOL_LOCATIONS = ["EOL 1", "EOL 2", "EOL 3", "EOL 4", "EOL 5", "EOL 6", "AR EOL", "BIGs EOL"];
-  const EOL_LUNCH = "12:30:00";
+  const EOL_SHIFT_MINUTES = 12 * 60;
   const OTHER_LOCATION = "__other__";
   const HEADERS = [
     "Container ID",
@@ -1435,20 +1435,23 @@
     const kinds = sheet.kinds || [];
     const body = rows
       .map((row, rowIndex) => {
-        const kind = kinds[rowIndex] || "";
-        const cells = row
-          .map((value, col) => {
-            const style = rowStyle(kind, value);
-            const blank = value == null || value === "";
-            if (blank && !style) return "";
-            const ref = `${colLetters(col)}${rowIndex + 1}`;
-            const painted = style ? ` s="${style}"` : "";
-            if (blank) return `<c r="${ref}"${painted}/>`;
-            return `<c r="${ref}"${painted} t="s"><v>${idOf(value)}</v></c>`;
-          })
-          .join("");
-        const tall = kind === "title" ? ` ht="22" customHeight="1"` : "";
-        return `<row r="${rowIndex + 1}"${tall}>${cells}</row>`;
+        const kindRow = kinds[rowIndex];
+        const width = Math.max(row.length, Array.isArray(kindRow) ? kindRow.length : 0);
+        const cells = [];
+        for (let col = 0; col < width; col++) {
+          const value = row[col];
+          const kind = Array.isArray(kindRow) ? kindRow[col] || "" : kindRow || "";
+          const style = rowStyle(kind, value);
+          const blank = value == null || value === "";
+          if (blank && !style) continue;
+          const ref = `${colLetters(col)}${rowIndex + 1}`;
+          const painted = style ? ` s="${style}"` : "";
+          cells.push(blank ? `<c r="${ref}"${painted}/>` : `<c r="${ref}"${painted} t="s"><v>${idOf(value)}</v></c>`);
+        }
+        const tall = (Array.isArray(kindRow) ? kindRow.includes("title") : kindRow === "title")
+          ? ` ht="22" customHeight="1"`
+          : "";
+        return `<row r="${rowIndex + 1}"${tall}>${cells.join("")}</row>`;
       })
       .join("");
     const widths = sheet.widths || [];
@@ -1929,15 +1932,82 @@
     return EOL_LOCATIONS.some((item) => item.toLowerCase() === name);
   }
 
-  function eolHalf(scannedAt) {
-    const text = cellText(scannedAt);
-    const time = text.length >= 19 ? text.slice(11, 19) : "";
-    if (!/^\d{2}:\d{2}:\d{2}$/.test(time)) return "first";
-    return time >= EOL_LUNCH ? "second" : "first";
+  function scanClock(scannedAt) {
+    const match = cellText(scannedAt).match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/);
+    if (!match) return null;
+    return { date: match[1], minutes: Number(match[2]) * 60 + Number(match[3]) };
   }
 
-  function eolFileName() {
-    return `LineFlush_EOL_${dayStamp()}.xlsx`;
+  function previousDate(iso) {
+    const [year, month, day] = iso.split("-").map(Number);
+    const date = new Date(year, month - 1, day);
+    date.setDate(date.getDate() - 1);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
+  }
+
+  function shiftKey(scannedAt) {
+    const clock = scanClock(scannedAt);
+    if (!clock) return null;
+    if (clock.minutes >= 6 * 60 && clock.minutes <= 17 * 60 + 59) return { shift: "Day", date: clock.date };
+    if (clock.minutes >= 18 * 60) return { shift: "Night", date: clock.date };
+    return { shift: "Night", date: previousDate(clock.date) };
+  }
+
+  function shiftOffset(scannedAt, shift) {
+    const clock = scanClock(scannedAt);
+    if (!clock) return null;
+    const start = shift === "Night" ? 18 * 60 : 6 * 60;
+    let offset = clock.minutes - start;
+    if (offset < 0) offset += 24 * 60;
+    if (offset < 0 || offset >= EOL_SHIFT_MINUTES) return null;
+    return offset;
+  }
+
+  function shiftClockLabel(offset, shift) {
+    const start = shift === "Night" ? 18 * 60 : 6 * 60;
+    const minutes = (start + offset) % (24 * 60);
+    let hour = Math.floor(minutes / 60);
+    const minute = String(minutes % 60).padStart(2, "0");
+    const suffix = hour >= 12 ? "PM" : "AM";
+    hour %= 12;
+    if (hour === 0) hour = 12;
+    return `${hour}:${minute} ${suffix}`;
+  }
+
+  function shiftRangeLabel(start, end, shift) {
+    return `${shiftClockLabel(start, shift)}–${shiftClockLabel(end, shift)}`;
+  }
+
+  const EOL_WINDOW_GROUPS = [
+    [{ name: "all", start: 0, end: 719 }],
+    [
+      { name: "1st Half", start: 0, end: 389 },
+      { name: "2nd Half", start: 390, end: 719 },
+    ],
+    [
+      { name: "1st Quarter", start: 0, end: 180 },
+      { name: "2nd Quarter", start: 181, end: 389 },
+      { name: "3rd Quarter", start: 390, end: 510 },
+      { name: "4th Quarter", start: 511, end: 719 },
+    ],
+    [
+      { start: 0, end: 120 },
+      { start: 121, end: 180 },
+      { start: 181, end: 240 },
+      { start: 241, end: 300 },
+      { start: 301, end: 360 },
+      { start: 361, end: 420 },
+      { start: 421, end: 480 },
+      { start: 481, end: 540 },
+      { start: 541, end: 600 },
+      { start: 601, end: 660 },
+      { start: 661, end: 719 },
+    ],
+  ];
+
+  function eolFileName(date, shift) {
+    return `LineFlush_EOL_${date}_${shift}.xlsx`;
   }
 
   function percentShares(counts) {
@@ -1987,49 +2057,82 @@
     return lines;
   }
 
-  function eolSummarySheet(records) {
-    const first = [];
-    const second = [];
-    for (const rec of records || []) {
-      if (!isEolLocation(rec.location)) continue;
-      (eolHalf(rec.scannedAt) === "second" ? second : first).push(rec);
+  function eolWindowTitle(window, shift) {
+    const range = shiftRangeLabel(window.start, window.end, shift);
+    if (window.name === "all") return `${shift === "Night" ? "All Night" : "All Day"}  ·  ${range}`;
+    if (window.name) return `${window.name}  ·  ${range}`;
+    return range;
+  }
+
+  function eolWindowBlock(title, records) {
+    const rows = [[title, "", "", "", ""], ["EOL", "Dropzone", "Containers", "Units", "Percent"]];
+    const kinds = [
+      ["title", "title", "title", "title", "title"],
+      ["header", "header", "header", "header", "header"],
+    ];
+    const lines = summarizeEolBlock(records);
+    if (!lines.length) {
+      rows.push(["No scans", "", "", "", ""]);
+      kinds.push(["band0", "band0", "band0", "band0", "band0"]);
+      return { rows, kinds };
     }
+    let prev = "";
+    let band = 0;
+    for (const line of lines) {
+      if (prev && line[0] !== prev) {
+        rows.push(["", "", "", "", ""]);
+        kinds.push(["", "", "", "", ""]);
+        band = band ? 0 : 1;
+      }
+      prev = line[0];
+      const kind = band ? "band1" : "band0";
+      rows.push(line);
+      kinds.push([kind, kind, kind, kind, kind]);
+    }
+    return { rows, kinds };
+  }
+
+  function eolSummarySheet(records, shift) {
+    const mode = shift === "Night" ? "Night" : "Day";
     const rows = [];
     const kinds = [];
     const merges = [];
-    const pushSection = (title, list) => {
-      merges.push(`A${rows.length + 1}:E${rows.length + 1}`);
-      rows.push([title, "", "", "", ""]);
-      kinds.push("title");
-      rows.push(["EOL", "Dropzone", "Containers", "Units", "Percent"]);
-      kinds.push("header");
-      const lines = summarizeEolBlock(list);
-      if (!lines.length) {
-        rows.push(["No scans", "", "", "", ""]);
-        kinds.push("band0");
-        return;
+    const ensure = (row, col) => {
+      while (rows.length <= row) {
+        rows.push([]);
+        kinds.push([]);
       }
-      let prev = "";
-      let band = 0;
-      for (const line of lines) {
-        if (prev && line[0] !== prev) {
-          rows.push(["", "", "", "", ""]);
-          kinds.push("");
-          band = band ? 0 : 1;
-        }
-        prev = line[0];
-        rows.push(line);
-        kinds.push(band ? "band1" : "band0");
+      while (rows[row].length <= col) {
+        rows[row].push("");
+        kinds[row].push("");
       }
     };
-    pushSection("1st Half Summary  ·  before 12:30 PM", first);
-    rows.push(["", "", "", "", ""]);
-    kinds.push("");
-    pushSection("2nd Half Summary  ·  12:30 PM and after", second);
-    rows.push(["", "", "", "", ""]);
-    kinds.push("");
-    pushSection("All Day Summary", first.concat(second));
-    return { name: "Summary", rows, kinds, merges, widths: [16, 28, 14, 12, 12] };
+    let col = 0;
+    for (const group of EOL_WINDOW_GROUPS) {
+      let row = 0;
+      for (const window of group) {
+        const matched = (records || []).filter((rec) => {
+          const offset = shiftOffset(rec.scannedAt, mode);
+          return offset != null && offset >= window.start && offset <= window.end;
+        });
+        const block = eolWindowBlock(eolWindowTitle(window, mode), matched);
+        merges.push(`${colLetters(col)}${row + 1}:${colLetters(col + 4)}${row + 1}`);
+        for (let r = 0; r < block.rows.length; r++) {
+          for (let c = 0; c < 5; c++) {
+            ensure(row + r, col + c);
+            rows[row + r][col + c] = block.rows[r][c];
+            kinds[row + r][col + c] = block.kinds[r][c];
+          }
+        }
+        row += block.rows.length + 1;
+      }
+      col += 6;
+    }
+    const widths = [];
+    for (let group = 0; group < EOL_WINDOW_GROUPS.length; group++) {
+      widths.push(22, 28, 14, 12, 12, 3);
+    }
+    return { name: "Summary", rows, kinds, merges, widths };
   }
 
   function eolPersonName(alias, used) {
@@ -2038,7 +2141,26 @@
     return locationSheetName(base, used);
   }
 
-  function eolWorkbook(people) {
+  function eolShiftRecords(records, shift, shiftDate) {
+    return (records || []).filter((rec) => {
+      if (!isEolLocation(rec.location)) return false;
+      const key = shiftKey(rec.scannedAt);
+      return Boolean(key && key.shift === shift && (!shiftDate || key.date === shiftDate));
+    });
+  }
+
+  function mergeShiftRecords(existing, personalRecords, personalDate, shift, shiftDate) {
+    const mine = eolShiftRecords(personalRecords, shift, shiftDate);
+    const kept = (existing || []).filter((rec) => {
+      const key = shiftKey(rec.scannedAt);
+      const clock = scanClock(rec.scannedAt);
+      return Boolean(key && key.shift === shift && key.date === shiftDate && clock && clock.date !== personalDate);
+    });
+    return [...kept, ...mine];
+  }
+
+  function eolWorkbook(people, shift) {
+    const mode = shift === "Night" ? "Night" : "Day";
     const used = new Set(["summary"]);
     const sorted = [...(people || [])].sort((a, b) =>
       String(a.alias || "").localeCompare(String(b.alias || ""), undefined, { sensitivity: "base" })
@@ -2046,12 +2168,12 @@
     const personSheets = [];
     const all = [];
     for (const person of sorted) {
-      const records = (person.records || []).filter((rec) => isEolLocation(rec.location));
+      const records = eolShiftRecords(person.records, mode);
       if (!records.length) continue;
       all.push(...records);
       personSheets.push({ name: eolPersonName(person.alias, used), rows: locationSheetRows(records) });
     }
-    return { sheets: [eolSummarySheet(all), ...personSheets] };
+    return { sheets: [eolSummarySheet(all, mode), ...personSheets] };
   }
 
   function peopleFromEolBook(book) {
@@ -2096,8 +2218,11 @@
     return json.ETag || json.d?.ETag || "*";
   }
 
-  async function publishEolWorkbook(alias, records) {
-    const name = eolFileName();
+  async function publishEolWorkbook(alias, records, scannedAt) {
+    const key = shiftKey(scannedAt);
+    if (!key) return "";
+    const personalDate = dayStamp();
+    const name = eolFileName(key.date, key.shift);
     const path = filePathFor(name);
     let lastErr = null;
     for (let attempt = 0; attempt < 6; attempt++) {
@@ -2114,10 +2239,12 @@
         if (err?.code === "EOL_LOCK") throw err;
         if (!/404/.test(String(err?.message || err))) throw err;
       }
+      const prior = people.find((person) => String(person.alias || "").toLowerCase() === String(alias || "").toLowerCase());
+      const combined = mergeShiftRecords(prior?.records, records, personalDate, key.shift, key.date);
       const merged = people.filter((person) => String(person.alias || "").toLowerCase() !== String(alias || "").toLowerCase());
-      merged.push({ alias, records });
+      merged.push({ alias, records: combined });
       try {
-        await writeSosFile(name, await workbookBytes(eolWorkbook(merged)), { etag: etag || "", quiet: true });
+        await writeSosFile(name, await workbookBytes(eolWorkbook(merged, key.shift)), { etag: etag || "", quiet: true });
       } catch (err) {
         lastErr = err;
         if (err?.code === "CONFLICT") continue;
@@ -2126,7 +2253,7 @@
       try {
         const checkBytes = await readSosBytes(path);
         const check = checkBytes && checkBytes.length ? peopleFromEolBook(await workbookFromXlsx(checkBytes)) : [];
-        if (eolSheetMatches(check, alias, records)) return name;
+        if (eolSheetMatches(check, alias, combined)) return name;
       } catch (err) {
         lastErr = err;
       }
@@ -2160,7 +2287,7 @@
     let eolNote = "";
     if (isEolLocation(record.location)) {
       try {
-        await publishEolWorkbook(alias, sosCache.records);
+        await publishEolWorkbook(alias, sosCache.records, record.scannedAt);
       } catch (err) {
         eolNote =
           err?.code === "EOL_LOCK"
