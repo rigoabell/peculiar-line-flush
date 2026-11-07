@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.31
+// @version      2.9.33
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
@@ -46,7 +46,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.31";
+  const VERSION = "2.9.33";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -323,13 +323,6 @@
     };
   }
 
-  const DASH_COLORS = {
-    Alert: "#b42318",
-    Caution: "#f5c518",
-    Good: "#0d7a3f",
-    "No age": "#98a2b3",
-  };
-
   function ageStatus(ageRaw) {
     const tone = ageTone(parseAgeDays(ageRaw));
     if (tone.label === "ALERT") return "Alert";
@@ -602,93 +595,6 @@
     }
     locals.reverse();
     return mergeRecords(records, locals).slice(0, (records || []).length);
-  }
-
-  function statusClass(status) {
-    if (status === "Alert") return "tag-alert";
-    if (status === "Caution") return "tag-caution";
-    if (status === "Good") return "tag-good";
-    if (status === "Not found") return "tag-miss";
-    if (status === "No age") return "tag-none";
-    return "tag-err";
-  }
-
-  function locationHue(index) {
-    const hue = Math.round((index * 137.508) % 360);
-    return `hsl(${hue}, 62%, 42%)`;
-  }
-
-  function pieChart(slices) {
-    const parts = slices.filter((slice) => slice.count > 0);
-    const total = parts.reduce((sum, slice) => sum + slice.count, 0);
-    const label = parts.map((slice) => `${slice.name} ${slice.count}`).join(", ") || "No age chart";
-    if (!total) return `<div class="empty">No found containers yet</div>`;
-    if (parts.length === 1) {
-      return `<svg viewBox="0 0 180 180" role="img" aria-label="${escapeHtml(label)}"><circle cx="90" cy="90" r="70" fill="${parts[0].color}"></circle></svg>`;
-    }
-    let angle = -Math.PI / 2;
-    const arcs = parts.map((part) => {
-      const sweep = (part.count / total) * Math.PI * 2;
-      const start = angle;
-      angle += sweep;
-      const x1 = 90 + 70 * Math.cos(start);
-      const y1 = 90 + 70 * Math.sin(start);
-      const x2 = 90 + 70 * Math.cos(angle);
-      const y2 = 90 + 70 * Math.sin(angle);
-      const large = sweep > Math.PI ? 1 : 0;
-      return `<path d="M 90 90 L ${x1.toFixed(2)} ${y1.toFixed(2)} A 70 70 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z" fill="${part.color}"></path>`;
-    });
-    return `<svg viewBox="0 0 180 180" role="img" aria-label="${escapeHtml(label)}">${arcs.join("")}</svg>`;
-  }
-
-  function barChart(rows, fillClass) {
-    if (!rows.length) return `<div class="empty">None yet</div>`;
-    const max = Math.max(...rows.map((row) => row.count), 1);
-    return rows
-      .map((row) => {
-        const width = Math.max(2, (row.count / max) * 100);
-        return `<div class="barrow"><div class="barlabel" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</div><div class="bartrack"><div class="barfill ${fillClass || ""}" style="width:${width}%"></div></div><div class="barcount">${row.count}</div></div>`;
-      })
-      .join("");
-  }
-
-  function tallyBoxes(tally) {
-    const boxes = [
-      ["Containers", tally.containers],
-      ["Units", formatUnits(tally.units)],
-      ["Alert", tally.alert],
-      ["Caution", tally.caution],
-      ["Good", tally.good],
-      ["No age", tally.noAge],
-      ["Not found", tally.miss],
-      ["Errors", tally.err],
-    ];
-    return `<div class="dash-totals">${boxes
-      .map(([label, value]) => `<div><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></div>`)
-      .join("")}</div>`;
-  }
-
-  function dashboardHtml(records, who) {
-    const list = records || [];
-    const summary = summarizeRecords(list);
-    const whoLine = `${who || "Operator"} · ${dayStamp()}`;
-    if (!list.length) {
-      return `<div class="dash-who">${escapeHtml(whoLine)}</div><div class="empty">No scans yet today.</div>`;
-    }
-    const locationRows = summary.locations
-      .map(
-        (loc) =>
-          `<div class="dash-loc">${escapeHtml(loc.name)} · ${loc.containers} containers · ${formatUnits(loc.units)} units · ${loc.alert} alert</div>`
-      )
-      .join("");
-    const scans = list
-      .map((row) => {
-        const units = row.units ? `${escapeHtml(row.units)} units` : "";
-        const when = cellText(row.scannedAt).slice(11, 19);
-        return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(when || "—")}</span><span>${escapeHtml(row.location)}</span><span>${escapeHtml(row.container)}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
-      })
-      .join("");
-    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-rule"><div class="dash-section">LOCATIONS</div>${locationRows}</div><div class="dash-rule"><div class="dash-section">SCANS</div>${scans}</div>`;
   }
 
   function stripBracketText(value) {
@@ -2557,10 +2463,18 @@
           overflow: hidden; text-overflow: ellipsis; max-width: 110px;
         }
         .brand {
-          flex: 0 0 auto; white-space: nowrap;
-          font-size: 12px; font-weight: 800; color: #111111; line-height: 1.15;
+          flex: 0 0 auto; display: flex; flex-direction: column;
+          color: #111111; line-height: 1.15;
         }
-        .brand span { font-weight: 700; }
+        .brand-title {
+          white-space: nowrap;
+          font-size: 12px; font-weight: 800;
+        }
+        .brand-title span { font-weight: 700; }
+        .brand-by {
+          font-size: 9px; font-weight: 600; letter-spacing: .01em;
+          opacity: .72; white-space: nowrap;
+        }
         .lamps { display: flex; gap: 4px; flex: 0 0 auto; }
         .lamp {
           display: flex; align-items: center; gap: 4px;
@@ -2626,7 +2540,7 @@
           border: 2px solid #111111; border-radius: 8px; background: #ffffff; color: #111111;
           transition: background .2s linear, border-color .2s linear;
         }
-        .age-kicker { font-size: 11px; letter-spacing: .12em; font-weight: 700; opacity: .8; }
+        .age-kicker { font-size: 11px; letter-spacing: .08em; font-weight: 700; opacity: .8; white-space: nowrap; }
         .age-val {
           flex: 1 1 auto; min-width: 0;
           font-size: 26px; font-weight: 800; line-height: 1.1;
@@ -2699,101 +2613,6 @@
         }
         .status.found { background: #e8f6ec; border-color: #0b6b2f; }
         .status.missing, .status.error { background: #fff4f4; border-color: #b42318; }
-        #dashboard { font-weight: 800; }
-        .dash {
-          display: none;
-          position: fixed;
-          inset: 0;
-          z-index: 35;
-          overflow: auto;
-          pointer-events: auto;
-          background: #e7e9ee;
-        }
-        .dash.open { display: block; }
-        .dash-card {
-          width: min(980px, calc((var(--plf-vw) - 24px) / var(--plf-boost, 1)));
-          margin: 12px auto;
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          padding: 14px;
-          background: #ffffff;
-          color: #111111;
-          border: 3px solid #111111;
-          border-radius: 12px;
-          box-shadow: 0 18px 50px rgba(0,0,0,.35);
-        }
-        .dash-bar {
-          display: flex; align-items: center; gap: 8px;
-          position: sticky; top: 0; z-index: 1;
-          background: #ffffff; padding-bottom: 8px;
-        }
-        .dash-title { flex: 1 1 auto; font-size: 22px; font-weight: 900; }
-        .dash-who { font-size: 13px; font-weight: 800; }
-        .dash-totals { display: flex; flex-wrap: wrap; gap: 8px; }
-        .dash-totals div {
-          min-width: 72px;
-          border: 1px solid #111111;
-          border-radius: 8px;
-          padding: 6px 8px;
-        }
-        .dash-totals b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
-        .dash-totals span { font-size: 11px; font-weight: 800; letter-spacing: .04em; }
-        .dash-equal { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-        .dash-pane {
-          min-width: 0;
-          border: 2px solid #111111;
-          border-radius: 10px;
-          padding: 10px;
-        }
-        .dash-rule { border-top: 2px solid #111111; padding-top: 10px; }
-        .dash-charts { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
-        .dash-pie { flex: 0 0 180px; }
-        .dash-pie svg { width: 180px; height: 180px; display: block; }
-        .dash-legend { flex: 1 1 140px; display: grid; gap: 6px; max-height: 180px; overflow: auto; }
-        .dash-key { display: flex; align-items: center; gap: 8px; font-weight: 800; }
-        .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #111111; }
-        .dash-section { font-size: 12px; font-weight: 800; letter-spacing: .08em; margin-bottom: 8px; }
-        .barrow {
-          display: grid;
-          grid-template-columns: minmax(90px, 180px) minmax(40px, 1fr) 36px;
-          gap: 8px;
-          align-items: center;
-          margin: 4px 0;
-        }
-        .barlabel { font-size: 12px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .bartrack { height: 14px; background: #eef1f5; border-radius: 999px; overflow: hidden; }
-        .barfill { height: 100%; background: #111111; border-radius: 999px; min-width: 2px; }
-        .barfill.parent { background: #1f4b99; }
-        .barcount { font-size: 12px; font-weight: 800; text-align: right; font-variant-numeric: tabular-nums; }
-        .dash-loc { margin-top: 10px; font-size: 14px; font-weight: 900; }
-        .dash-parent { margin: 6px 0 2px 8px; font-size: 13px; font-weight: 800; }
-        button.dash-line {
-          display: flex;
-          gap: 8px;
-          width: 100%;
-          box-sizing: border-box;
-          padding-left: 16px;
-          text-align: left;
-          border: 0;
-          border-bottom: 1px solid #eef1f5;
-          border-radius: 0;
-          background: #ffffff;
-          font-weight: 700;
-        }
-        .tag {
-          margin-left: auto;
-          border-radius: 999px;
-          padding: 1px 8px;
-          font-size: 11px;
-          font-weight: 800;
-        }
-        .tag-alert { background: #b42318; color: #ffffff; }
-        .tag-caution { background: #f5c518; color: #111111; }
-        .tag-good { background: #0d7a3f; color: #ffffff; }
-        .tag-miss { background: #fdeceb; color: #b42318; }
-        .tag-err { background: #fff4e5; color: #b54708; }
-        .tag-none { background: #eef1f5; color: #111111; }
         .locprompt, .dbg, .sharebox, .excelock, .accessdeny {
           display: none;
           position: fixed;
@@ -2915,7 +2734,7 @@
         :host(.closed) .fab { display: block; pointer-events: auto !important; }
         :host(.closed) { pointer-events: none !important; }
         @container plf (max-width: 720px) {
-          .split, .focusrow, .dash-equal { grid-template-columns: 1fr; }
+          .split, .focusrow { grid-template-columns: 1fr; }
           .history { border-left: 0; border-top: 2px solid #111111; }
           .modal { max-height: calc((var(--plf-vh) - 12px) / var(--plf-boost, 1)); }
           .lineswrap, .histwrap { max-height: min(160px, calc((var(--plf-vh) - 280px) / var(--plf-boost, 1))); }
@@ -2926,7 +2745,7 @@
         <div class="backdrop" id="backdrop"></div>
         <div class="modal" id="modal">
           <div class="bar">
-            <div class="brand">${SCRIPT_NAME} <span>${VERSION}</span></div>
+            <div class="brand"><div class="brand-title">${SCRIPT_NAME} <span>${VERSION}</span></div><div class="brand-by">developed by abelrigm</div></div>
             <div class="who" id="opTitle" title="${SCRIPT_NAME} ${VERSION}">Operator</div>
             <div class="lamps">
               <div class="lamp" id="lampPec" title="Inventory page"><span class="dot"></span>Page</div>
@@ -2934,7 +2753,6 @@
             </div>
             <div class="counts" id="counts"></div>
                 <div class="clock" id="clock">00:00:00</div>
-            <button id="dashboard" type="button" title="Charts for today's scans">Dashboard</button>
             <button id="share" type="button" title="Share the Tampermonkey install link">Share</button>
             <button id="debug" title="Copy debug JSON">Debug</button>
             <select id="panelSize" title="Panel size. Screen matches your display. +25% and +50% make this panel bigger.">
@@ -2957,7 +2775,7 @@
               <div class="age-tag" id="ageTag">—</div>
             </div>
             <div class="locboard" id="locBoard">
-              <div class="age-kicker">OUTER</div>
+              <div class="age-kicker">OUTER LOCATION</div>
               <div class="age-val" id="locVal">Select</div>
               <div class="age-tag" id="locTag">—</div>
             </div>
@@ -3061,15 +2879,6 @@
           <div id="accessMsg">This box stays here until the save works. RETRY is the only way to close it.</div>
           <button id="accessOpen" type="button">OPEN THE FOLDER</button>
           <button id="accessRetry" type="button">RETRY</button>
-        </div>
-      </div>
-      <div class="dash" id="dash">
-        <div class="dash-card">
-          <div class="dash-bar">
-            <div class="dash-title">Dashboard</div>
-            <button id="dashClose" type="button">Close</button>
-          </div>
-          <div id="dashBody"></div>
         </div>
       </div>
       <div class="locprompt" id="locprompt">
@@ -3720,51 +3529,6 @@
       else shareStatus.textContent = "Copy failed. Click the link above, press Ctrl+A, then press Ctrl+C. Then paste it in Chime.";
     }
 
-    function paintDashboard() {
-      const panel = shadow.getElementById("dash");
-      if (!panel.classList.contains("open")) return;
-      const saved =
-        sosCache.day === dayStamp() && sosCache.alias === (alias || "") ? sosCache.records || [] : [];
-      const local = recent.slice().reverse().map(historyRecord);
-      const records = mergeRecords(saved, local);
-      shadow.getElementById("dashBody").innerHTML = dashboardHtml(records, alias || "");
-    }
-
-    async function openDashboard() {
-      const panel = shadow.getElementById("dash");
-      panel.classList.add("open");
-      shadow.getElementById("dashBody").innerHTML = `<div class="empty">Loading today's scans…</div>`;
-      const prevError = lastError;
-      try {
-        const who = alias || (await currentAlias());
-        alias = who;
-        shadow.getElementById("opTitle").textContent = who;
-        await ensureSosCache(who);
-      } catch {
-        /* Today's scans on this computer still show if the file cannot be read. */
-      }
-      lastError = prevError;
-      paintDashboard();
-    }
-
-    function closeDashboard() {
-      shadow.getElementById("dash").classList.remove("open");
-      focusScanBox();
-    }
-
-    shadow.getElementById("dashboard").addEventListener("click", () => {
-      openDashboard().catch(() => paintDashboard());
-    });
-    shadow.getElementById("dashClose").addEventListener("click", () => closeDashboard());
-    shadow.getElementById("dashBody").addEventListener("click", (event) => {
-      const line = event.target.closest("[data-container]");
-      if (!line) return;
-      const id = line.getAttribute("data-container") || "";
-      const found = recent.find((item) => idsMatch(item.id, id));
-      if (found?.result) showTicket(found.id, found.result);
-      closeDashboard();
-    });
-
     shadow.getElementById("share").addEventListener("click", () => {
       shareStatus.textContent = "";
       sharePanel.classList.add("open");
@@ -3933,7 +3697,6 @@
         flashPanel();
         renderStats();
         renderHistory();
-        paintDashboard();
         const extra = scanQueue.length ? ` · ${scanQueue.length} queued` : "";
         setBanner(
           result.ok ? "found" : result.error === "NOT_FOUND" ? "missing" : "error",
@@ -3947,7 +3710,6 @@
             fileOk = true;
             lastError = "";
             tick();
-            paintDashboard();
             if (working || !idsMatch(selectedId, id)) return;
             const eolNote = session?.eolNote ? `<div>${escapeHtml(session.eolNote)}</div>` : "";
             setBanner(
