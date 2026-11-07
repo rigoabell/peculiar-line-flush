@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.34
+// @version      2.9.35
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
@@ -32,6 +32,7 @@
   Each operator scans in the panel. Each person gets their own daily file in:
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
+  A night that runs past midnight keeps that same file until 6:00 AM. At 6:00 AM the next file starts.
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
   EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
@@ -46,7 +47,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.34";
+  const VERSION = "2.9.35";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1069,12 +1070,19 @@
     GM_setValue(KEYS.location, selectedLocation);
   }
 
+  function fileDate(at) {
+    const clock = scanClock(cellText(at) || nowIso());
+    if (!clock) return dayStamp();
+    if (clock.minutes < 6 * 60) return previousDate(clock.date);
+    return clock.date;
+  }
+
   function fileNameFor(alias) {
-    return `LineFlush_${dayStamp()}_${alias}.xlsx`;
+    return `LineFlush_${fileDate()}_${alias}.xlsx`;
   }
 
   function csvNameFor(alias) {
-    return `LineFlush_${dayStamp()}_${alias}.csv`;
+    return `LineFlush_${fileDate()}_${alias}.csv`;
   }
 
   function filePathFor(name) {
@@ -1772,7 +1780,7 @@
   }
 
   async function ensureSosCache(alias) {
-    if (sosCache.book && sosCache.alias === alias && sosCache.day === dayStamp()) return;
+    if (sosCache.book && sosCache.alias === alias && sosCache.day === fileDate()) return;
     await assertSosFolder();
     const name = fileNameFor(alias);
     let bytes = await readSosBytes(filePathFor(name));
@@ -1797,7 +1805,7 @@
       }
     }
     sosCache.alias = alias;
-    sosCache.day = dayStamp();
+    sosCache.day = fileDate();
     sosCache.name = name;
     sosCache.book = book;
     sosCache.records = recordsFromBook(book);
@@ -2067,10 +2075,12 @@
 
   function mergeShiftRecords(existing, personalRecords, personalDate, shift, shiftDate) {
     const mine = eolShiftRecords(personalRecords, shift, shiftDate);
+    const seen = new Set(mine.map((rec) => [rec.container, rec.scannedAt, rec.location].join("\u0001")));
     const kept = (existing || []).filter((rec) => {
       const key = shiftKey(rec.scannedAt);
       const clock = scanClock(rec.scannedAt);
-      return Boolean(key && key.shift === shift && key.date === shiftDate && clock && clock.date !== personalDate);
+      if (!key || key.shift !== shift || key.date !== shiftDate || !clock || clock.date === personalDate) return false;
+      return !seen.has([rec.container, rec.scannedAt, rec.location].join("\u0001"));
     });
     return [...kept, ...mine];
   }
@@ -2213,7 +2223,7 @@
     }
     const session = {
       alias,
-      day: dayStamp(),
+      day: fileDate(),
       name: sosCache.name,
       count: sosCache.records.length,
       location: record.location,
@@ -2260,7 +2270,7 @@
 
   function loadHistory(alias) {
     const pack = GM_getValue(KEYS.history, null);
-    if (!pack || pack.day !== dayStamp() || pack.alias !== alias || !Array.isArray(pack.rows)) return [];
+    if (!pack || pack.day !== fileDate() || pack.alias !== alias || !Array.isArray(pack.rows)) return [];
     return pack.rows.map((row) => {
       if (!row?.result?.raw) return row;
       const result = { ...row.result };
@@ -2270,7 +2280,7 @@
   }
 
   function saveHistory(alias, rows) {
-    GM_setValue(KEYS.history, { day: dayStamp(), alias, rows: rows.slice(0, 800), t: Date.now() });
+    GM_setValue(KEYS.history, { day: fileDate(), alias, rows: rows.slice(0, 800), t: Date.now() });
   }
 
   function uiPixelRatio() {
@@ -3262,7 +3272,7 @@
       shadow.getElementById("lampPec").className = "lamp" + (pec ? " ok" : " bad");
       shadow.getElementById("lampSp").className = "lamp" + (spOk ? " ok" : " bad");
       const ses = GM_getValue(KEYS.session, null);
-      const today = ses?.day === dayStamp() && ses?.name;
+      const today = ses?.day === fileDate() && ses?.name;
       if (updateNotice && updateNoticeUntil && Date.now() > updateNoticeUntil) updateNotice = "";
       if (updateNotice && updateNotice !== toastedNotice) {
         toastedNotice = updateNotice;
