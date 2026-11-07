@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.33
+// @version      2.9.34
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
@@ -46,7 +46,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.33";
+  const VERSION = "2.9.34";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2505,10 +2505,12 @@
           background: #ffffff; color: #111111;
           font-size: 12px; font-weight: 800; padding: 0 4px;
         }
+        .x {
           width: 28px; height: 28px; padding: 0; border-radius: 7px;
-          background: #ffffff; color: #111111; font-size: 18px; line-height: 1;
+          background: #b42318; color: #ffffff; border: 1px solid #b42318;
+          font-size: 18px; line-height: 1;
         }
-        .x:hover { background: #f3f5f8; }
+        .x:hover { background: #8f1c14; color: #ffffff; }
         .scanrow {
           display: flex; align-items: center; gap: 8px;
           padding: 8px 10px; background: #ffffff;
