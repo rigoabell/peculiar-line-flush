@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.30
+// @version      2.9.31
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
@@ -46,7 +46,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.30";
+  const VERSION = "2.9.31";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -691,6 +691,14 @@
     return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-rule"><div class="dash-section">LOCATIONS</div>${locationRows}</div><div class="dash-rule"><div class="dash-section">SCANS</div>${scans}</div>`;
   }
 
+  function stripBracketText(value) {
+    return cellText(value).replace(/\s*\[[^\]]*\]/g, "").replace(/\s+/g, " ").trim();
+  }
+
+  function outerLocationLabel(result) {
+    return stripBracketText(result?.outerLocation || result?.parentContainer || "");
+  }
+
   function splitIdType(raw) {
     const s = cellText(raw);
     const m = s.match(/^(\S+)\s*\[([^\]]+)\]\s*$/);
@@ -786,6 +794,7 @@
     );
     const oldestAge = fieldLine(t, "Oldest Units Age") || inventory[0]?.age || "";
     const totalUnits = fieldLine(t, "Total units") || inventory.reduce((n, r) => n + Number(r.quantity || 0), 0) || "";
+    const outerRaw = fieldLine(t, "Outer Location") || fieldLine(t, "Outer location");
     const found = Boolean(oldestAge || inventory.length);
     return {
       ok: found,
@@ -796,6 +805,7 @@
       parentContainer: parent.id,
       parentType: parent.type,
       grandparent: grand.id,
+      outerLocation: stripBracketText(outerRaw || parent.id),
       inventory,
       raw: t,
     };
@@ -2947,7 +2957,7 @@
               <div class="age-tag" id="ageTag">—</div>
             </div>
             <div class="locboard" id="locBoard">
-              <div class="age-kicker">LOCATION</div>
+              <div class="age-kicker">OUTER</div>
               <div class="age-val" id="locVal">Select</div>
               <div class="age-tag" id="locTag">—</div>
             </div>
@@ -3361,15 +3371,14 @@
       return { total: recent.length, ok, miss, err };
     }
 
+    let shownOuterLocation = "";
+
     function paintLocationBoard() {
       const val = shadow.getElementById("locVal");
       const tag = shadow.getElementById("locTag");
       if (!val || !tag) return;
-      val.textContent = selectedLocation || "Select";
-      const count = selectedLocation
-        ? recent.filter((row) => historyRecord(row).location === selectedLocation).length
-        : 0;
-      tag.textContent = selectedLocation ? String(count) : "—";
+      val.textContent = shownOuterLocation || "—";
+      tag.textContent = "";
     }
 
     function renderStats() {
@@ -3395,6 +3404,8 @@
       shadow.getElementById("identity").innerHTML = bits.length
         ? bits.map((bit) => escapeHtml(bit)).join(" · ")
         : `<span class="empty">No container yet</span>`;
+      shownOuterLocation = outerLocationLabel(result);
+      paintLocationBoard();
       paintAge(result);
       const lines = result?.inventory || [];
       shadow.getElementById("lines").innerHTML = lines.length
