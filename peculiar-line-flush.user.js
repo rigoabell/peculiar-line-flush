@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.35
+// @version      2.10.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -12,6 +12,12 @@
 // @match        https://*.cloudfront.net/idp-selection*
 // @match        https://*.federated-auth.aft.a2z.com/*
 // @match        https://qifcr.na.aftx.amazonoperations.app/*
+// @match        https://aft-moveapp.na.aftx.amazonoperations.app/*
+// @match        https://aft-moveapp.eu.aftx.amazonoperations.app/*
+// @match        https://aft-moveapp.fe.aftx.amazonoperations.app/*
+// @include      /^https:\/\/fcmenu-[a-z0-9-]+\.corp\.amazon\.com(\/.*)?$/
+// @match        https://fcmenu-iad-regionalized.corp.amazon.com/*
+// @match        https://fcmenu-dub-regionalized.corp.amazon.com/*
 // @connect      amazon-my.sharepoint.com
 // @connect      raw.githubusercontent.com
 // @run-at       document-start
@@ -33,6 +39,7 @@
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
   A night that runs past midnight keeps that same file until 6:00 AM. At 6:00 AM the next file starts.
+  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL on the open Move App scan page.
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
   EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
@@ -47,12 +54,13 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.35";
+  const VERSION = "2.10.0";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
   const OLD_SCRIPT_NAME = "Peculiar Inventory Scan Panel";
   const PECULIAR_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
+  const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=200";
   const SP_SITE = "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com";
   const SOS_FOLDER =
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/Line Flush Records";
@@ -76,6 +84,16 @@
     locationIdle: "plf.locationIdle",
     panelSize: "plf.panelSize",
     panelOpen: "plf.panelOpen",
+    dropzoneAsk: "plf.dropzoneAsk",
+    dropzones: "plf.dropzones",
+    dropzoneQueue: "plf.dropzoneQueue",
+    dropzoneCursor: "plf.dropzoneCursor",
+    dropzoneStatus: "plf.dropzoneStatus",
+    dropzoneHeartbeat: "plf.dropzoneScanHeartbeat",
+    dropzoneTried: "plf.dropzoneTried",
+    dropzoneLanded: "plf.dropzoneLanded",
+    dropzoneNudge: "plf.dropzoneNudge",
+    dropzoneTrace: "plf.dropzoneTrace",
   };
   const IDLE_LOCATION_MS = 10 * 60 * 1000;
   const TOTAL_SHEET = "TOTAL";
@@ -106,6 +124,7 @@
   const HEADERS = [
     "Container ID",
     "Scanned At",
+    "Dropped",
     "Scanner",
     "Container Type",
     "Total Units",
@@ -124,6 +143,8 @@
 
   const host = location.hostname;
   const isPeculiar = /peculiar-inventory|aft-aging-inventory/i.test(host);
+  const isMoveApp = /aft-moveapp/i.test(host);
+  const isFcMenu = /^fcmenu-[a-z0-9-]+\.corp\.amazon\.com$/i.test(host);
   const isLoginChooser = /idp-selection|federated-auth\.aft\.a2z\.com|qifcr\.na\.aftx\.amazonoperations\.app/i.test(location.href);
   const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   let isTop = true;
@@ -356,6 +377,8 @@
       status,
       units: ok ? cellText(result?.totalUnits) : "",
       scannedAt: cellText(scannedAt),
+      outer: cellText(result?.reportedOuter) || outerLocationLabel(result),
+      dropped: cellText(result?.dropped),
     };
   }
 
@@ -439,7 +462,7 @@
     ];
     for (const loc of summary.locations) rows.push(tallyCells(loc.name, loc));
     rows.push([]);
-    rows.push(["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At"]);
+    rows.push(["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At", "Dropped"]);
     for (const rec of records || []) {
       rows.push([
         rec.location,
@@ -449,6 +472,7 @@
         rec.status,
         rec.units,
         rec.scannedAt || "",
+        rec.dropped || "",
       ]);
     }
     return rows;
@@ -467,6 +491,7 @@
       const parentCol = col("Parent Container");
       const statusCol = col("Status");
       const timeCol = col("Scanned At");
+      const droppedCol = col("Dropped");
       for (const row of sheet.rows.slice(1)) {
         const container = cellText(row[idCol]);
         const rawStatus = cellText(row[statusCol]);
@@ -482,6 +507,7 @@
           status,
           units: rawStatus === "OK" ? cellText(row[unitCol]) : "",
           scannedAt: timeCol >= 0 ? cellText(row[timeCol]) : "",
+          dropped: droppedCol >= 0 ? cellText(row[droppedCol]) : "",
         });
       }
     }
@@ -494,6 +520,7 @@
     if (start < 0) return null;
     const header = rows[start];
     const scannedCol = header.findIndex((cell) => cellText(cell) === "Scanned At");
+    const droppedCol = header.findIndex((cell) => cellText(cell) === "Dropped");
     const records = [];
     for (const row of rows.slice(start + 1)) {
       const container = cellText(row[2]);
@@ -506,6 +533,8 @@
         status: cellText(row[4]) || "Error",
         units: cellText(row[5]),
         scannedAt: scannedCol >= 0 ? cellText(row[scannedCol]) : "",
+        outer: cellText(row[1]) || "",
+        dropped: droppedCol >= 0 ? cellText(row[droppedCol]) : "",
       });
     }
     return records;
@@ -1751,6 +1780,7 @@
       return [
         result.containerId || containerId,
         nowIso(),
+        i === 0 ? cellText(result.dropped) : "",
         alias,
         i === 0 ? result.containerType || "" : "",
         i === 0 ? result.totalUnits || "" : "",
@@ -1827,9 +1857,9 @@
   }
 
   function locationSheetRows(records) {
-    const rows = [["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At"]];
+    const rows = [["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At", "Dropped"]];
     for (const rec of records) {
-      rows.push([rec.location, rec.parent, rec.container, rec.age, rec.status, rec.units, rec.scannedAt || ""]);
+      rows.push([rec.location, rec.parent, rec.container, rec.age, rec.status, rec.units, rec.scannedAt || "", rec.dropped || ""]);
     }
     return rows;
   }
@@ -2234,6 +2264,969 @@
     return session;
   }
 
+  const STATIONS_OUTER = "rccretstations";
+  const STATIONS_DROPZONE = "dz-P-CR-EOL";
+
+  function backgroundDropzone(enabled, dropzone, container) {
+    const zone = cellText(dropzone);
+    const id = cellText(container);
+    if (!enabled || !zone || !id) return null;
+    return { container: id, dropzone: zone };
+  }
+
+  function priorOuterLabel(live, prior) {
+    const next = stripBracketText(live);
+    const old = stripBracketText(prior);
+    if (old && next.toLowerCase() === STATIONS_DROPZONE.toLowerCase()) return old;
+    return next;
+  }
+
+  function rememberPriorOuter(container, outer) {
+    const day = fileDate();
+    const pack = GM_getValue("plf.preDropOuter", null);
+    const map = pack && pack.day === day && pack.map && typeof pack.map === "object" ? { ...pack.map } : {};
+    const old = stripBracketText(outer);
+    if (!old) return;
+    map[cellText(container).toLowerCase()] = old;
+    GM_setValue("plf.preDropOuter", { day, map });
+  }
+
+  function rememberedPrior(container) {
+    const pack = GM_getValue("plf.preDropOuter", null);
+    if (!pack || pack.day !== fileDate() || !pack.map) return "";
+    return cellText(pack.map[cellText(container).toLowerCase()]);
+  }
+
+  function reportedParent(parent, prior) {
+    const full = cellText(parent) || "(no parent)";
+    const kept = priorOuterLabel(full, prior);
+    if (kept && kept.toLowerCase() !== stripBracketText(full).toLowerCase()) return kept;
+    return full;
+  }
+
+  async function markContainerDropped(containerId) {
+    const id = cellText(containerId).toLowerCase();
+    if (!id || !sosCache.alias) return;
+    await ensureSosCache(sosCache.alias);
+    const records = sosCache.records || [];
+    let index = -1;
+    for (let i = records.length - 1; i >= 0; i--) {
+      if (cellText(records[i].container).toLowerCase() === id) {
+        index = i;
+        break;
+      }
+    }
+    if (index < 0 || records[index].dropped === "Dropped") return;
+    const snapshot = records.map((rec) => ({ ...rec }));
+    const previous = sosCache.book;
+    const next = records.map((rec, i) => (i === index ? { ...rec, dropped: "Dropped" } : rec));
+    sosCache.records = next;
+    sosCache.book = dashboardBook(next);
+    try {
+      await writeSosFile(sosCache.name, await workbookBytes(sosCache.book));
+    } catch (err) {
+      sosCache.records = snapshot;
+      sosCache.book = previous;
+      throw err;
+    }
+  }
+
+  function stationsDropPrompt(enabled, outerLocation, container) {
+    if (enabled !== true) return null;
+    const outer = stripBracketText(outerLocation).toLowerCase();
+    const id = cellText(container);
+    if (!id || outer !== STATIONS_OUTER) return null;
+    return { container: id, dropzone: STATIONS_DROPZONE };
+  }
+
+  function normalizeSavedDropzones(list) {
+    const source = Array.isArray(list) ? list : [STATIONS_DROPZONE];
+    const seen = new Set();
+    const out = [];
+    for (const item of source) {
+      const name = cellText(item).slice(0, 40);
+      const key = name.toLowerCase();
+      if (!name || seen.has(key)) continue;
+      seen.add(key);
+      out.push(name);
+    }
+    return out;
+  }
+
+  function loadSavedDropzones() {
+    return normalizeSavedDropzones(GM_getValue(KEYS.dropzones, null));
+  }
+
+  function saveSavedDropzones(list) {
+    const next = normalizeSavedDropzones(list);
+    GM_setValue(KEYS.dropzones, next);
+    return next;
+  }
+
+  function dropzoneDebugView(state) {
+    const saved = Array.isArray(state?.saved) ? state.saved.map((item) => cellText(item)).filter(Boolean) : [];
+    const events = Array.isArray(state?.trace?.events) ? state.trace.events.slice(-12) : [];
+    const jobs = Array.isArray(state?.queue?.jobs) ? state.queue.jobs : [];
+    const cursor = Number(state?.cursor) || 0;
+    const pending = jobs
+      .filter((job) => job && Number(job.n) > cursor)
+      .map((job) => ({ n: Number(job.n), container: cellText(job.container), dropzone: cellText(job.dropzone) }));
+    const rawStatus = state?.status && typeof state.status === "object" ? state.status : null;
+    const heartbeat = Number(state?.heartbeat) || 0;
+    const now = Number(state?.now) || 0;
+    return {
+      ask: state?.ask === true,
+      saved,
+      events,
+      pending,
+      status: rawStatus
+        ? {
+            container: cellText(rawStatus.container),
+            dropzone: cellText(rawStatus.dropzone),
+            ok: Boolean(rawStatus.ok),
+            error: cellText(rawStatus.error),
+            detail: cellText(rawStatus.detail),
+            t: Number(rawStatus.t) || 0,
+          }
+        : null,
+      tried: cellText(state?.tried?.href) || cellText(state?.target),
+      landed: cellText(state?.landed?.href),
+      landedTitle: cellText(state?.landed?.title),
+      landedAgeMs: state?.landed?.t ? Math.max(0, now - (Number(state.landed.t) || 0)) : null,
+      heartbeatAgeMs: heartbeat ? Math.max(0, now - heartbeat) : null,
+      moveOpen: Boolean(heartbeat && now - heartbeat < HEARTBEAT_STALE_MS),
+    };
+  }
+
+  function rememberDropzone(event) {
+    const prev = GM_getValue(KEYS.dropzoneTrace, null);
+    const events = Array.isArray(prev?.events) ? prev.events : [];
+    const next = [...events, { t: nowIso(), ...event }].slice(-12);
+    const trace = { events: next };
+    GM_setValue(KEYS.dropzoneTrace, trace);
+    return trace;
+  }
+
+  function scanBurstKeys(text) {
+    return [...Array.from(cellText(text)), "Enter"];
+  }
+
+  function moveStableText(text) {
+    return String(text || "")
+      .replace(/\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?/gi, "#")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function moveBadPhrase(before, after) {
+    const re = /\b(invalid|not found|unknown barcode|unknown|error|failed|cannot|can't|does not|doesn't|unrecognized|no such|try again)\b/gi;
+    const phrases = (text) => new Set((String(text).match(re) || []).map((item) => item.toLowerCase()));
+    const prev = phrases(before);
+    for (const phrase of phrases(after)) {
+      if (!prev.has(phrase)) return phrase;
+    }
+    return "";
+  }
+
+  function moveTokenCount(text, token) {
+    const needle = cellText(token).toLowerCase();
+    if (!needle) return 0;
+    const hay = moveStableText(text).toLowerCase();
+    let count = 0;
+    let from = 0;
+    while (from < hay.length) {
+      const at = hay.indexOf(needle, from);
+      if (at < 0) break;
+      count += 1;
+      from = at + needle.length;
+    }
+    return count;
+  }
+
+  function moveScreenProblem(text) {
+    const screen = String(text || "");
+    if (/not of appropriate type/i.test(screen)) return "Not the right type";
+    if (/scan was unsuccessful/i.test(screen)) return "Scan was unsuccessful";
+    return "";
+  }
+
+  function moveScanAccepted(before, after, token) {
+    const problem = moveScreenProblem(after);
+    if (problem) return { ok: false, error: problem };
+    const bad = moveBadPhrase(before, after);
+    if (bad) return { ok: false, error: bad };
+    if (!cellText(token) || moveTokenCount(after, token) <= moveTokenCount(before, token)) {
+      return { ok: false, error: "Page did not show " + cellText(token) };
+    }
+    return { ok: true, error: "" };
+  }
+
+  function containerJustMoved(before, after, container) {
+    const id = cellText(container).toLowerCase();
+    if (!id) return false;
+    const moved = (text) => {
+      const hay = moveStableText(text).toLowerCase();
+      let from = 0;
+      while (from < hay.length) {
+        const at = hay.indexOf(id, from);
+        if (at < 0) return false;
+        if (/^\s*moved/.test(hay.slice(at + id.length, at + id.length + 12))) return true;
+        from = at + id.length;
+      }
+      return false;
+    };
+    return /move successful/i.test(after) && moved(after) && !moved(before);
+  }
+
+  function moveDropAccepted(before, after, token, container) {
+    if (/fcmenu/i.test(String(after || ""))) return { ok: false, error: "FC Menu opened" };
+    const problem = moveScreenProblem(after);
+    if (problem) return { ok: false, error: problem };
+    const bad = moveBadPhrase(before, after);
+    if (bad) return { ok: false, error: bad };
+    const shown = cellText(token) && moveTokenCount(after, token) > moveTokenCount(before, token);
+    if (shown || containerJustMoved(before, after, container)) return { ok: true, error: "" };
+    return { ok: false, error: "Page did not show " + cellText(token) };
+  }
+
+  function moveIsScanPage(href, title) {
+    if (/404|not found/i.test(cellText(title))) return false;
+    try {
+      const parsed = new URL(cellText(href));
+      return /aft-moveapp/i.test(parsed.hostname)
+        && /\/move-container(?:\/|$)/i.test(parsed.pathname)
+        && Boolean(parsed.searchParams.get("jobId"));
+    } catch {
+      return false;
+    }
+  }
+
+  function movePageReady(href, title, text, readyState) {
+    if (!moveIsScanPage(href, title)) return false;
+    const screen = String(text || "");
+    if (/scan was unsuccessful|not of appropriate type|scan a pallet/i.test(screen)) return false;
+    if (/scan destination/i.test(screen) && !/scan source|scan container/i.test(screen)) return false;
+    if (!/scan source|scan container|waiting for scan/i.test(screen)) return false;
+    if (readyState && readyState !== "complete" && readyState !== "interactive") return false;
+    return true;
+  }
+
+  function moveStatusNoise(text) {
+    const name = cellText(text).toLowerCase();
+    return name.startsWith("dropzone waiting")
+      || name.startsWith("move app is open")
+      || name.startsWith("ready to scan")
+      || name.startsWith("opening ")
+      || name.startsWith("sending ")
+      || name.startsWith("container scan")
+      || name.startsWith("waiting for a container")
+      || name.startsWith("this page cannot")
+      || name.startsWith("the page is showing")
+      || name.startsWith("source accepted")
+      || name.startsWith("source stopped")
+      || name.startsWith("destination accepted")
+      || name.startsWith("destination stopped")
+      || name.startsWith("stopped.");
+  }
+
+  function moveWorkflowScore(text) {
+    const name = cellText(text).toLowerCase();
+    if (!name || /pallet/.test(name) || moveStatusNoise(name)) return -1;
+    let score = 0;
+    if (/drop\s*zone/.test(name)) score += 5;
+    if (/container/.test(name)) score += 3;
+    if (/tote/.test(name)) score += 3;
+    return score;
+  }
+
+  function moveChromeLabel(text) {
+    const name = cellText(text).toLowerCase();
+    if (!name || moveStatusNoise(name)) return true;
+    return /^(menu|sign out|reset session|continue|confirm|confirm move|select workflow|source)$/.test(name)
+      || /scan source|scan destination|scan a pallet|not of appropriate type|waiting for scan/.test(name);
+  }
+
+  function moveWorkflowPick(labels) {
+    const texts = (Array.isArray(labels) ? labels : []).map((item) => cellText(item)).filter(Boolean);
+    const ranked = texts
+      .map((text) => ({ text, score: moveWorkflowScore(text) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || a.text.localeCompare(b.text));
+    if (ranked.length) return ranked[0].text;
+    const neutral = texts.filter((text) => !moveChromeLabel(text) && moveWorkflowScore(text) === 0 && text.length <= 40);
+    return neutral.length === 1 ? neutral[0] : "";
+  }
+
+  function noteMoveLanded() {
+    GM_setValue(KEYS.dropzoneLanded, {
+      href: location.href,
+      title: document.title || "",
+      t: Date.now(),
+    });
+  }
+
+  function moveFresh() {
+    if (isMoveApp && isTop && moveIsScanPage(location.href, document.title)) return true;
+    const landed = GM_getValue(KEYS.dropzoneLanded, null);
+    if (landed && !moveIsScanPage(landed.href, landed.title)) return false;
+    const t = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
+    return Date.now() - t < HEARTBEAT_STALE_MS;
+  }
+
+  function enqueueBackgroundDropzone(container, dropzone) {
+    const job = backgroundDropzone(true, dropzone, container);
+    if (!job) return null;
+    const pack = GM_getValue(KEYS.dropzoneQueue, { n: 0, jobs: [] }) || { n: 0, jobs: [] };
+    const n = Number(pack.n || 0) + 1;
+    const jobs = [...(Array.isArray(pack.jobs) ? pack.jobs : []), { n, container: job.container, dropzone: job.dropzone, t: Date.now() }];
+    GM_setValue(KEYS.dropzoneQueue, { n, jobs: jobs.slice(-30) });
+    return job;
+  }
+
+  let moveTabOpenedAt = 0;
+  function ensureMoveTab() {
+    GM_setValue(KEYS.dropzoneTried, { href: MOVE_URL, t: Date.now() });
+    GM_setValue(KEYS.dropzoneNudge, Date.now());
+    rememberDropzone({ step: "opening", dropzone: MOVE_URL });
+    const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
+    if (Date.now() - heartbeat < HEARTBEAT_STALE_MS) return;
+    if (Date.now() - moveTabOpenedAt < 4000) return;
+    moveTabOpenedAt = Date.now();
+    GM_setValue("plf.dropzoneClaim", { n: 0, t: 0, tab: "" });
+    try {
+      GM_openInTab(MOVE_URL, { active: true, insert: true, setParent: true });
+    } catch {
+      /* The Move App tab could not be opened. */
+    }
+  }
+
+  function moveEachRoot(visit) {
+    const seen = new Set();
+    const walk = (root) => {
+      if (!root || seen.has(root) || !root.querySelectorAll) return;
+      seen.add(root);
+      visit(root);
+      root.querySelectorAll("*").forEach((el) => {
+        if (el.shadowRoot) walk(el.shadowRoot);
+      });
+      root.querySelectorAll("iframe, frame").forEach((frame) => {
+        try {
+          if (frame.contentDocument) walk(frame.contentDocument);
+        } catch {
+          /* A cross-origin frame stays on its own page. */
+        }
+      });
+    };
+    walk(document);
+  }
+
+  function moveScreenText() {
+    let out = "";
+    const walk = (node) => {
+      if (!node || out.length > 50000) return;
+      if (node.nodeType === 3) {
+        out += node.nodeValue;
+        return;
+      }
+      if (node.nodeType !== 1 && node.nodeType !== 11) return;
+      if (node.nodeType === 1) {
+        const tag = node.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT") return;
+        if (node.id && String(node.id).startsWith("plf-")) return;
+        const view = node.ownerDocument?.defaultView;
+        if (view) {
+          const style = view.getComputedStyle(node);
+          if (style.display === "none" || style.visibility === "hidden") return;
+        }
+        if (node.shadowRoot) walk(node.shadowRoot);
+      }
+      const kids = node.childNodes || [];
+      for (let i = 0; i < kids.length; i += 1) walk(kids[i]);
+    };
+    if (document.body) walk(document.body);
+    document.querySelectorAll("iframe, frame").forEach((frame) => {
+      try {
+        if (frame.contentDocument?.body) walk(frame.contentDocument.body);
+      } catch {
+        /* A cross-origin frame stays on its own page. */
+      }
+    });
+    return out.replace(/\s+/g, " ").trim().slice(0, 50000);
+  }
+
+  function moveDeepActive(doc) {
+    let el = doc?.activeElement || null;
+    const guard = new Set();
+    while (el?.shadowRoot?.activeElement && !guard.has(el)) {
+      guard.add(el);
+      el = el.shadowRoot.activeElement;
+    }
+    return el;
+  }
+
+  function moveVisible(el) {
+    if (!el || el.nodeType !== 1 || !el.getBoundingClientRect) return false;
+    const view = el.ownerDocument?.defaultView;
+    if (!view) return false;
+    const style = view.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function moveTextField(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === "TEXTAREA") return true;
+    if (tag !== "INPUT") return false;
+    const type = String(el.type || "text").toLowerCase();
+    return type === "text" || type === "search" || type === "tel" || type === "number" || type === "";
+  }
+
+  function moveInputScore(el, active) {
+    let score = 0;
+    const blob = [el.placeholder, el.getAttribute?.("aria-label"), el.name, el.id, el.getAttribute?.("data-testid")].join(" ");
+    if (/scan|barcode|container|drop|location|tote|lpn|bin/i.test(blob)) score += 8;
+    if (el === active) score += 12;
+    return score;
+  }
+
+  function moveScanInput() {
+    const active = moveDeepActive(document);
+    const found = [];
+    moveEachRoot((root) => {
+      root.querySelectorAll("input, textarea, [contenteditable='true']").forEach((el) => {
+        if (moveTextField(el) && moveVisible(el) && !el.disabled && !el.readOnly) found.push(el);
+      });
+    });
+    found.sort((a, b) => moveInputScore(b, active) - moveInputScore(a, active));
+    return found[0] || null;
+  }
+
+  function moveScanTarget() {
+    const active = moveDeepActive(document);
+    if (moveTextField(active) && moveVisible(active)) return active;
+    return moveScanInput() || active || document.body || document.documentElement;
+  }
+
+  function moveKeyCode(ch) {
+    if (ch === "Enter") return 13;
+    if (ch === "Escape") return 27;
+    if (/^[a-zA-Z]$/.test(ch)) return ch.toUpperCase().charCodeAt(0);
+    return ch.charCodeAt(0);
+  }
+
+  function moveKeyName(ch) {
+    if (ch === "Escape") return "Escape";
+    if (/^[a-zA-Z]$/.test(ch)) return "Key" + ch.toUpperCase();
+    if (/^[0-9]$/.test(ch)) return "Digit" + ch;
+    if (ch === "-" || ch === "_") return "Minus";
+    if (ch === ".") return "Period";
+    return "";
+  }
+
+  function fireMoveKey(target, ch) {
+    const view = target.ownerDocument?.defaultView || pageWindow;
+    const keyCode = moveKeyCode(ch);
+    const types = ch === "Escape" ? ["keydown", "keyup"] : ["keydown", "keypress", "keyup"];
+    types.forEach((type) => {
+      const keypress = type === "keypress";
+      const init = {
+        key: ch,
+        code: ch === "Enter" ? "Enter" : moveKeyName(ch),
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        keyCode,
+        which: keypress && ch !== "Enter" ? ch.charCodeAt(0) : keyCode,
+        charCode: keypress ? ch.charCodeAt(0) : 0,
+      };
+      let event;
+      try {
+        event = new view.KeyboardEvent(type, init);
+      } catch {
+        event = new KeyboardEvent(type, init);
+      }
+      try {
+        Object.defineProperty(event, "keyCode", { configurable: true, get: () => keyCode });
+        Object.defineProperty(event, "which", { configurable: true, get: () => init.which });
+        Object.defineProperty(event, "charCode", { configurable: true, get: () => init.charCode });
+      } catch {
+        /* The browser locked the event fields. */
+      }
+      target.dispatchEvent(event);
+    });
+  }
+
+  function moveSetField(el, value) {
+    const view = el.ownerDocument?.defaultView || pageWindow;
+    const text = cellText(value);
+    try {
+      el.focus();
+    } catch {
+      /* The scan field cannot take focus. The value is still set. */
+    }
+    if (el.isContentEditable) {
+      el.textContent = text;
+      el.dispatchEvent(new view.InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+      return;
+    }
+    const proto = el.tagName === "TEXTAREA" ? view.HTMLTextAreaElement.prototype : view.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    if (setter) setter.call(el, text);
+    else el.value = text;
+    el.dispatchEvent(new view.InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+    el.dispatchEvent(new view.Event("change", { bubbles: true }));
+  }
+
+  function fcMenuControl(node) {
+    const el = node instanceof Element ? node : node?.parentElement;
+    if (!el?.closest) return null;
+    const control = el.closest("a, button, [role='button'], [role='link']");
+    if (!control || control.closest?.("#dz-batch-panel, [id^='plf-']")) return null;
+    const href = String(control.href || control.getAttribute("href") || "");
+    const label = cellText(control.innerText || control.getAttribute("aria-label") || control.getAttribute("title")).toLowerCase();
+    if (/fcmenu/i.test(href) || label === "menu") return control;
+    return null;
+  }
+
+  function disarmFcMenuControls() {
+    moveEachRoot((root) => {
+      if (!root.querySelectorAll) return;
+      root.querySelectorAll("a, button, [role='button'], [role='link']").forEach((el) => {
+        if (!fcMenuControl(el)) return;
+        const href = el.getAttribute("href");
+        if (href) {
+          el.setAttribute("data-plf-href", href);
+          el.removeAttribute("href");
+        }
+        el.setAttribute("tabindex", "-1");
+      });
+    });
+  }
+
+  function blockFcMenuOpen() {
+    if (blockFcMenuOpen.armed) return;
+    blockFcMenuOpen.armed = true;
+    const stop = (event) => {
+      if (!fcMenuControl(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      rememberDropzone({ step: "menu-blocked" });
+    };
+    document.addEventListener("click", stop, true);
+    document.addEventListener("auxclick", stop, true);
+    document.addEventListener("keydown", stop, true);
+    document.addEventListener("keyup", stop, true);
+    const nativeOpen = pageWindow.open;
+    pageWindow.open = function(url, ...rest) {
+      if (/fcmenu/i.test(String(url || ""))) {
+        rememberDropzone({ step: "menu-blocked", dropzone: String(url || "") });
+        return null;
+      }
+      return nativeOpen.call(pageWindow, url, ...rest);
+    };
+  }
+
+  function moveBurstTarget() {
+    const body = document.body || document.documentElement;
+    disarmFcMenuControls();
+    const active = moveDeepActive(document);
+    if (active && active !== body && active !== document.documentElement && !moveTextField(active)) {
+      try {
+        active.blur();
+      } catch {
+        /* The focused control can stay focused. The keys still go to the page. */
+      }
+    }
+    try {
+      body.focus();
+    } catch {
+      /* The page body cannot take focus. The keys still go to it. */
+    }
+    return body;
+  }
+
+  async function burstMoveScan(text, label) {
+    const code = cellText(text);
+    const name = label || code;
+    paintMoveBadge("Sending " + name);
+    try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
+    const target = moveBurstTarget();
+    if (!target) return;
+    for (const ch of [...Array.from(code), "Enter"]) fireMoveKey(target, ch);
+  }
+
+  function moveOwnUi(el) {
+    return Boolean(el?.closest?.("[id^='plf-']") || (el?.id && String(el.id).startsWith("plf-")));
+  }
+
+  function movePress(el) {
+    if (!el) return;
+    const view = el.ownerDocument?.defaultView || pageWindow;
+    const opts = { bubbles: true, cancelable: true, view };
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+      try {
+        const Ctor = type.startsWith("pointer") && view.PointerEvent ? view.PointerEvent : view.MouseEvent;
+        el.dispatchEvent(new Ctor(type, opts));
+      } catch {
+        /* This page does not accept that pointer event. */
+      }
+    });
+    try { el.click(); } catch { /* The control could not be clicked. */ }
+  }
+
+  function moveClickButton(label) {
+    const want = cellText(label).toLowerCase();
+    if (!want) return false;
+    let clicked = false;
+    moveEachRoot((root) => {
+      if (clicked || !root.querySelectorAll) return;
+      root.querySelectorAll("button, a, [role='button'], [role='link'], input[type='button'], input[type='submit'], div, span, li, label").forEach((el) => {
+        if (clicked || !moveVisible(el) || moveOwnUi(el)) return;
+        const text = cellText(el.innerText || el.value || el.getAttribute?.("aria-label")).toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+        if (text !== want && !text.startsWith(want + " ")) return;
+        if (text.length > 40) return;
+        const clickable = el.closest("button, a, [role='button'], [role='link']") || el;
+        movePress(clickable);
+        clicked = true;
+      });
+    });
+    return clicked;
+  }
+
+  function paintMoveBadge(text) {
+    if (!isMoveApp || !document.documentElement) return;
+    let el = document.getElementById("plf-move-badge");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "plf-move-badge";
+      el.style.cssText = "display:none !important;";
+      document.documentElement.appendChild(el);
+    }
+    el.textContent = text;
+    const status = document.getElementById("dz-status");
+    if (status) status.textContent = text;
+  }
+
+  function mountMoveBatchPanel(container, dropzone) {
+    const paint = () => {
+      if (!document.documentElement) return;
+      if (!document.getElementById("dz-batch-style")) {
+        const style = document.createElement("style");
+        style.id = "dz-batch-style";
+        style.textContent = "#dz-batch-panel{display:none !important;}";
+        document.documentElement.appendChild(style);
+      }
+      let panel = document.getElementById("dz-batch-panel");
+      if (!panel) {
+        panel = document.createElement("div");
+        panel.id = "dz-batch-panel";
+        panel.innerHTML = "<header><b>Dropzone Batch</b><span class=\"dz-ver\">running</span></header><div class=\"dz-body\"><label>Dropzone</label><input id=\"dz-dropzone\" type=\"text\" readonly><label>Containers</label><textarea id=\"dz-containers\" readonly></textarea><div class=\"dz-status\" id=\"dz-status\">Starting the scan.</div></div>";
+        (document.body || document.documentElement).appendChild(panel);
+      }
+      const dz = document.getElementById("dz-dropzone");
+      const box = document.getElementById("dz-containers");
+      if (dz && dropzone) dz.value = dropzone;
+      if (box && container) box.value = container;
+    };
+    paint();
+    if (!document.body) document.addEventListener("DOMContentLoaded", paint, { once: true });
+  }
+
+  function moveWorkflowChoices() {
+    const out = [];
+    const seen = new Set();
+    moveEachRoot((root) => {
+      if (!root.querySelectorAll) return;
+      root.querySelectorAll("a, button, [role='button'], [role='link'], li, div, span, label, option").forEach((el) => {
+        if (moveOwnUi(el)) return;
+        const select = el.tagName === "OPTION" ? el.closest("select") : null;
+        if (select) {
+          if (!moveVisible(select)) return;
+        } else if (!moveVisible(el)) return;
+        const text = cellText(el.innerText || el.textContent || el.getAttribute?.("aria-label")).replace(/\s+/g, " ");
+        if (!text || text.length > 80 || moveStatusNoise(text)) return;
+        const href = el.href || el.getAttribute?.("href") || "";
+        const key = (text + "|" + href).toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ text, href, el, select });
+      });
+    });
+    return out;
+  }
+
+  function moveChoiceKey(choice) {
+    return (cellText(choice?.text) + "|" + cellText(choice?.href)).toLowerCase();
+  }
+
+  function moveActivateChoice(pick) {
+    if (!pick?.el) return;
+    if (pick.select) {
+      const view = pick.select.ownerDocument?.defaultView || pageWindow;
+      pick.select.value = pick.el.value;
+      pick.el.selected = true;
+      pick.select.dispatchEvent(new view.Event("input", { bubbles: true }));
+      pick.select.dispatchEvent(new view.Event("change", { bubbles: true }));
+      return;
+    }
+    const clickable = pick.el.closest?.("button, a, [role='button'], [role='link']") || pick.el;
+    movePress(clickable);
+  }
+
+  async function moveLeavePalletWorkflow() {
+    const screen = moveScreenText();
+    if (movePageReady(location.href, document.title, screen, document.readyState)) return null;
+    const pallet = /scan source pallet|scan a pallet|scan destination pallet|not of appropriate type/i.test(screen);
+    const claim = GM_getValue("plf.dropzoneClaim", null);
+    const jobN = Number(claim?.n) || 0;
+    const prior = GM_getValue("plf.dropzoneWorkflow", null);
+    if (prior && Number(prior.n) === jobN && Date.now() - (Number(prior.t) || 0) < 60000) {
+      if (pallet) return { ok: false, error: "Workflow still wants a pallet", detail: cellText(prior.name) };
+      return null;
+    }
+    if (!pallet && !/select workflow/i.test(screen)) return null;
+    const namedChoice = (choices, allowNeutral) => {
+      const labels = choices.map((choice) => choice.text);
+      const name = allowNeutral
+        ? moveWorkflowPick(labels)
+        : labels
+          .map((text) => ({ text, score: moveWorkflowScore(text) }))
+          .filter((item) => item.score > 0)
+          .sort((a, b) => b.score - a.score || a.text.localeCompare(b.text))[0]?.text;
+      return name ? choices.find((choice) => cellText(choice.text) === name) : null;
+    };
+    let seen = moveWorkflowChoices();
+    let pick = namedChoice(seen, false);
+    const before = new Set(seen.filter((choice) => !choice.select).map(moveChoiceKey));
+    if (!pick) {
+      paintMoveBadge("Opening the workflow list");
+      try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
+      moveClickButton("Select workflow");
+      for (let i = 0; i < 12 && !pick; i += 1) {
+        await sleep(300);
+        seen = moveWorkflowChoices().filter((choice) => choice.select || !before.has(moveChoiceKey(choice)));
+        pick = namedChoice(seen, true);
+      }
+    }
+    if (!pick) {
+      const labels = seen.map((choice) => choice.text).filter((text) => !moveChromeLabel(text)).slice(0, 12).join(" | ");
+      const fallback = seen.map((choice) => choice.text).slice(0, 12).join(" | ");
+      return {
+        ok: false,
+        error: "No container workflow in the list",
+        detail: clip(labels || fallback || screen, 240),
+      };
+    }
+    paintMoveBadge("Opening " + pick.text);
+    rememberDropzone({ step: "workflow", workflow: pick.text });
+    GM_setValue("plf.dropzoneWorkflow", { n: jobN, name: pick.text, t: Date.now() });
+    const href = cellText(pick.href);
+    let sameJob = false;
+    try {
+      sameJob = href && new URL(href, location.href).searchParams.get("jobId") === new URL(location.href).searchParams.get("jobId");
+    } catch {
+      sameJob = false;
+    }
+    if (href && /jobId=\d+/i.test(href) && !sameJob) {
+      GM_setValue("plf.dropzoneClaim", {
+        n: jobN,
+        t: Date.now(),
+        href: location.href,
+      });
+      location.assign(href);
+      return { switching: true, ok: false, error: "Opening " + pick.text };
+    }
+    moveActivateChoice(pick);
+    await sleep(800);
+    return { stayed: true };
+  }
+
+  async function waitForMoveReady() {
+    const start = Date.now();
+    while (Date.now() - start < 20000) {
+      noteMoveLanded();
+      const text = moveScreenText();
+      if (/scan was unsuccessful|not of appropriate type/i.test(text)) {
+        const reloaded = Number(GM_getValue("plf.dropzoneReload", 0)) || 0;
+        if (Date.now() - reloaded > 20000) {
+          GM_setValue("plf.dropzoneReload", Date.now());
+          paintMoveBadge("Refreshing the scan page");
+          location.assign(MOVE_URL);
+          return { switching: true, ok: false, error: "Refreshing the scan page" };
+        }
+        paintMoveBadge("The page is showing a scan error. Leaving it on screen.");
+        await sleep(2000);
+        return { ok: false, error: "Page is showing a scan error", detail: clip(text, 240) };
+      }
+      if (movePageReady(location.href, document.title, text, document.readyState)) {
+        paintMoveBadge("Scan screen is ready");
+        try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
+        return { ok: true, detail: clip(moveScreenText(), 240) };
+      }
+      paintMoveBadge("Waiting for the scan screen");
+      await sleep(80);
+    }
+    return {
+      ok: false,
+      error: "Move page was not ready",
+      detail: clip(location.href + " " + moveScreenText(), 240),
+    };
+  }
+
+  async function waitForMoveToken(beforeRaw, token, container) {
+    const start = Date.now();
+    let last = moveStableText(beforeRaw);
+    let stableAt = 0;
+    let saw = false;
+    while (Date.now() - start < 8000) {
+      const raw = moveScreenText();
+      const sig = moveStableText(raw);
+      const verdict = container
+        ? moveDropAccepted(beforeRaw, raw, token, container)
+        : moveScanAccepted(beforeRaw, raw, token);
+      if (sig !== last) {
+        last = sig;
+        saw = true;
+        stableAt = Date.now();
+      } else if (saw && stableAt && Date.now() - stableAt >= 100) {
+        return { ...verdict, detail: clip(raw, 240) };
+      }
+      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 100) {
+        return { ...verdict, detail: clip(raw, 240) };
+      }
+      await sleep(40);
+    }
+    const raw = moveScreenText();
+    const verdict = container
+      ? moveDropAccepted(beforeRaw, raw, token, container)
+      : moveScanAccepted(beforeRaw, raw, token);
+    return { ...verdict, detail: clip(raw, 240) };
+  }
+
+  async function performDropzone(container, dropzone) {
+    mountMoveBatchPanel(container, dropzone);
+    rememberDropzone({ container, dropzone, step: "waiting" });
+    const ready = await waitForMoveReady();
+    if (!ready.ok) return ready;
+    paintMoveBadge("1/1 scan container " + container);
+    rememberDropzone({ container, dropzone, step: "tote" });
+    const beforeRaw = moveScreenText();
+    await burstMoveScan(container, container);
+    const first = await waitForMoveToken(beforeRaw, container);
+    paintMoveBadge(first.ok ? "Tote accepted: " + container : "Container was not scanned");
+    if (!first.ok) return { ok: false, error: "Container was not scanned", detail: first.detail || "" };
+    await sleep(400);
+    const midRaw = moveScreenText();
+    if (/move was unsuccessful|action failed/i.test(midRaw)) {
+      return { ok: false, error: "The move failed", detail: clip(midRaw, 240) };
+    }
+    paintMoveBadge("1/1 scan dropzone " + dropzone);
+    rememberDropzone({ container, dropzone, step: "dropzone" });
+    await burstMoveScan(dropzone, dropzone);
+    const second = await waitForMoveToken(midRaw, dropzone, container);
+    paintMoveBadge(second.ok ? "Dropzone accepted: " + dropzone : "Dropzone stopped: " + (second.error || "not accepted"));
+    const detail = second.detail || first.detail || "";
+    if (/fcmenu/i.test(location.href)) return { ok: false, error: "FC Menu opened", detail };
+    if (!moveIsScanPage(location.href, document.title)) return { ok: false, error: "Left the scan page", detail };
+    if (!second.ok) return { ok: false, error: second.error || "Page did not show " + dropzone, detail };
+    return { ok: true, error: "", detail };
+  }
+
+  let moveWorkerStarted = false;
+  let moveWorkerAt = 0;
+  let moveSawJob = false;
+  const moveTabId = Math.random().toString(36).slice(2);
+  async function closeMoveTabWhenDone() {
+    const pack = GM_getValue(KEYS.dropzoneQueue, null);
+    const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
+    const pending = (Array.isArray(pack?.jobs) ? pack.jobs : []).filter((job) => job && Number(job.n) > cursor);
+    if (pending.length) return;
+    if (!moveSawJob && Date.now() - moveWorkerAt < 8000) return;
+    if (closeMoveTabWhenDone.closing) return;
+    closeMoveTabWhenDone.closing = true;
+    paintMoveBadge("Done. Closing this tab.");
+    GM_setValue(KEYS.dropzoneHeartbeat, 0);
+    await sleep(400);
+    try { window.close(); } catch { /* The browser kept this tab open. */ }
+  }
+
+  async function drainDropzones() {
+    if (drainDropzones.working) return;
+    drainDropzones.working = true;
+    try {
+      for (;;) {
+        const pack = GM_getValue(KEYS.dropzoneQueue, null);
+        const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
+        const jobs = (Array.isArray(pack?.jobs) ? pack.jobs : [])
+          .filter((job) => job && Number(job.n) > cursor)
+          .sort((a, b) => Number(a.n) - Number(b.n));
+        if (!jobs.length) break;
+        moveSawJob = true;
+        const job = jobs[0];
+        const claim = GM_getValue("plf.dropzoneClaim", null);
+        if (claim && claim.tab && claim.tab !== moveTabId && Number(claim.n) === Number(job.n) && Date.now() - (Number(claim.t) || 0) < 25000) return;
+        GM_setValue("plf.dropzoneClaim", { n: Number(job.n), t: Date.now(), tab: moveTabId, href: location.href });
+        await sleep(60);
+        const held = GM_getValue("plf.dropzoneClaim", null);
+        if (!held || held.tab !== moveTabId || Number(held.n) !== Number(job.n)) return;
+        let result = { ok: false, error: "Dropzone failed" };
+        try {
+          result = await performDropzone(job.container, job.dropzone);
+        } catch (err) {
+          result = { ok: false, error: String(err?.message || err) };
+        }
+        if (result?.switching) return;
+        GM_setValue(KEYS.dropzoneCursor, Number(job.n));
+        GM_setValue(KEYS.dropzoneStatus, {
+          n: job.n,
+          container: job.container,
+          dropzone: job.dropzone,
+          ok: Boolean(result.ok),
+          error: result.error || "",
+          detail: clip(result.detail || "", 240),
+          t: Date.now(),
+        });
+      }
+      await closeMoveTabWhenDone();
+    } finally {
+      drainDropzones.working = false;
+    }
+  }
+
+  function startMoveDropzoneWorker() {
+    if (!moveWorkerStarted) {
+      moveWorkerStarted = true;
+      moveWorkerAt = Date.now();
+      blockFcMenuOpen();
+      const beat = () => {
+        disarmFcMenuControls();
+        noteMoveLanded();
+        GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+        const pack = GM_getValue(KEYS.dropzoneQueue, null);
+        const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
+        const job = (Array.isArray(pack?.jobs) ? pack.jobs : []).find((item) => item && Number(item.n) > cursor);
+        if (job) mountMoveBatchPanel(job.container, job.dropzone);
+        if (drainDropzones.working) return;
+        const text = moveScreenText();
+        paintMoveBadge(movePageReady(location.href, document.title, text, document.readyState) ? "Ready to scan a container" : "Move App is open");
+      };
+      beat();
+      setInterval(beat, HEARTBEAT_MS);
+      setInterval(() => drainDropzones(), 1000);
+      GM_addValueChangeListener(KEYS.dropzoneQueue, () => {
+        drainDropzones();
+      });
+      GM_addValueChangeListener(KEYS.dropzoneNudge, () => {
+        try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
+        drainDropzones();
+      });
+    }
+    drainDropzones();
+  }
+
   function startPeculiarWorker() {
     GM_setValue(KEYS.heartbeat, Date.now());
     setInterval(() => GM_setValue(KEYS.heartbeat, Date.now()), HEARTBEAT_MS);
@@ -2374,6 +3367,19 @@
       },
       queued: scanQueueLen,
       recent: recent.slice(0, 8).map((r) => ({ t: r.t, id: r.id, age: r.age, sku: r.sku, status: r.status })),
+      dropzone: dropzoneDebugView({
+        ask: GM_getValue(KEYS.dropzoneAsk, false) === true,
+        saved: loadSavedDropzones(),
+        trace: GM_getValue(KEYS.dropzoneTrace, null),
+        queue: GM_getValue(KEYS.dropzoneQueue, null),
+        cursor: GM_getValue(KEYS.dropzoneCursor, 0),
+        status: GM_getValue(KEYS.dropzoneStatus, null),
+        heartbeat: GM_getValue(KEYS.dropzoneHeartbeat, 0),
+        tried: GM_getValue(KEYS.dropzoneTried, null),
+        landed: GM_getValue(KEYS.dropzoneLanded, null),
+        target: MOVE_URL,
+        now: Date.now(),
+      }),
     };
     const text = JSON.stringify(payload, null, 2);
     let copied = false;
@@ -2539,12 +3545,42 @@
           border-radius: 8px; padding: 7px 10px; font-size: 22px; font-weight: 700;
           letter-spacing: .04em; outline: none;
         }
+        .dzrow {
+          display: flex; align-items: center; gap: 8px;
+          padding: 6px 10px; background: #ffffff;
+          border-bottom: 2px solid #111111;
+        }
+        .dzrow label {
+          display: flex; align-items: center; gap: 6px;
+          font-size: 12px; font-weight: 800; white-space: nowrap;
+        }
+        #dzStatus {
+          flex: 1 1 180px; min-width: 0;
+          font-size: 12px; font-weight: 700;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .dzpop {
+          display: none; position: absolute; inset: 0; z-index: 6;
+          align-items: center; justify-content: center;
+          background: rgba(17, 17, 17, .35); pointer-events: auto;
+        }
+        .dzpop.open { display: flex; }
+        .dzpop-card {
+          width: min(520px, calc((var(--plf-vw) - 32px) / var(--plf-boost, 1)));
+          display: flex; flex-direction: column; gap: 12px;
+          padding: 16px; background: #ffffff; color: #111111;
+          border: 3px solid #111111; border-radius: 12px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
+        }
+        #dzPromptText { font-size: 18px; font-weight: 800; line-height: 1.3; }
+        .dzpop-actions { display: flex; gap: 8px; }
+        .dzpop-actions button { height: 42px; flex: 1; font-size: 16px; font-weight: 800; }
+        #dzYes { background: #111111; color: #ffffff; border-color: #111111; }
         #q::placeholder, #filter::placeholder { color: #667085; }
         #q:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(17,17,17,.12); }
         .focusrow {
           display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
           margin: 8px 10px 0; padding-bottom: 8px;
-          border-bottom: 2px solid #111111;
         }
         .ageboard, .locboard {
           display: flex; align-items: baseline; gap: 10px;
@@ -2582,12 +3618,20 @@
         .history th:nth-child(4), .history td:nth-child(4) { width: 44px; }
         .bar, .scanrow, .status, .focusrow, .identity, .foot { position: relative; z-index: 1; flex: 0 0 auto; }
         .identity {
-          margin: 8px 10px 0; padding: 8px 10px;
+          display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+          margin: 8px 10px 12px; padding: 0;
           font-size: 16px; font-weight: 800; line-height: 1.35;
-          overflow-wrap: anywhere;
           background: #ffffff; color: #111111;
           border: 2px solid #111111; border-radius: 8px;
+          overflow: hidden;
         }
+        .idcell {
+          min-width: 0; padding: 8px 10px;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          border-right: 2px solid #111111;
+        }
+        .idcell:last-child { border-right: 0; }
+        .identity a.sku { color: inherit; font-weight: 800; text-decoration: underline; }
         .lineswrap, .histwrap { min-height: 0; overflow: auto; max-height: min(240px, calc((var(--plf-vh) - 230px) / var(--plf-boost, 1))); }
         .histhead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
         .histhead span { font-size: 11px; letter-spacing: .12em; font-weight: 700; color: #111111; }
@@ -2779,6 +3823,10 @@
             <button id="delLoc" type="button" disabled title="Remove this custom location">Delete</button>
             <input id="q" type="text" placeholder="Scan container" autocomplete="off" spellcheck="false" />
             </div>
+          <div class="dzrow">
+            <label for="dzAsk"><input id="dzAsk" type="checkbox" /> Ask to dropzone</label>
+            <div id="dzStatus">Off</div>
+          </div>
           <div class="status ready" id="note">Ready</div>
           <div class="focusrow">
             <div class="ageboard" id="ageBoard">
@@ -2910,6 +3958,15 @@
           </div>
         </div>
       </div>
+      </div>
+      <div class="dzpop" id="dzPrompt">
+        <div class="dzpop-card">
+          <div id="dzPromptText"></div>
+          <div class="dzpop-actions" id="dzPopActions">
+            <button id="dzYes" type="button">Yes</button>
+            <button id="dzNo" type="button">No</button>
+          </div>
+        </div>
       </div>
       <div class="plf-fab-dock"><button class="fab" id="fab">Line Flush</button></div>`;
     document.documentElement.append(hostEl);
@@ -3210,22 +4267,16 @@
     }
 
     function showTicket(id, result) {
-      const container = cellText((result && result.containerId) || id);
-      const type = cellText(result?.containerType);
+      const container = stripBracketText((result && result.containerId) || id);
       const units = cellText(result?.totalUnits);
-      const parent = cellText(result?.parentContainer);
-      const parentType = cellText(result?.parentType);
-      const grand = cellText(result?.grandparent);
-      const bits = [
-        container ? container + (type ? ` [${type}]` : "") : "",
-        units ? `${units} units` : "",
-        parent ? `Parent ${parent}${parentType ? ` [${parentType}]` : ""}` : "",
-        grand ? `Grandparent ${grand}` : "",
-      ].filter(Boolean);
-      shadow.getElementById("identity").innerHTML = bits.length
-        ? bits.map((bit) => escapeHtml(bit)).join(" · ")
-        : `<span class="empty">No container yet</span>`;
-      shownOuterLocation = outerLocationLabel(result);
+      const cells = [
+        container ? skuLink(container) : `<span class="empty">—</span>`,
+        units ? escapeHtml(`${units} units`) : `<span class="empty">—</span>`,
+      ];
+      const identity = shadow.getElementById("identity");
+      identity.style.gridTemplateColumns = "repeat(2, minmax(0, 1fr))";
+      identity.innerHTML = cells.map((html) => `<div class="idcell">${html}</div>`).join("");
+      shownOuterLocation = priorOuterLabel(outerLocationLabel(result), rememberedPrior(container));
       paintLocationBoard();
       paintAge(result);
       const lines = result?.inventory || [];
@@ -3683,6 +4734,7 @@
           inventoryCount: (result.inventory || []).length,
           matched: idsMatch(result.containerId, id),
           lookupMs: result.lookupMs || 0,
+          outerLocation: outerLocationLabel(result),
           raw: clip(result.raw || "", 600),
         };
         const who = alias || (await currentAlias());
@@ -3693,7 +4745,12 @@
         delete stored.raw;
         selectedId = id;
         const scannedAt = nowIso();
+        const prior = rememberedPrior(id);
+        result.reportedOuter = priorOuterLabel(outerLocationLabel(result), prior);
+        result.reportedParent = reportedParent(result.parentContainer, prior);
         const record = scanRecord(id, result, location, scannedAt);
+        record.parent = result.reportedParent;
+        record.outer = result.reportedOuter;
         recent.unshift({
           t: scannedAt,
           id,
@@ -3706,6 +4763,7 @@
         });
         persist();
         showTicket(id, result);
+        maybeAskDropzone(id, result);
         flashPanel();
         renderStats();
         renderHistory();
@@ -3837,6 +4895,133 @@
       input.focus({ preventScroll: true });
       input.value += ch;
     };
+
+    const dzAsk = shadow.getElementById("dzAsk");
+    const dzStatus = shadow.getElementById("dzStatus");
+    const dzPrompt = shadow.getElementById("dzPrompt");
+    const dzPromptText = shadow.getElementById("dzPromptText");
+    const dzPopActions = shadow.getElementById("dzPopActions");
+    const dropPromptQueue = [];
+    let dropPromptCurrent = null;
+    let dropWaitingClose = false;
+    dzAsk.checked = GM_getValue(KEYS.dropzoneAsk, false) === true;
+
+    function paintDropzoneStatus(text) {
+      if (dzStatus) dzStatus.textContent = text;
+    }
+    function paintAskState() {
+      paintDropzoneStatus(dzAsk.checked ? `On · rcCRetStations asks for ${STATIONS_DROPZONE}` : "Off");
+    }
+    function hideDropPrompt() {
+      dropPromptCurrent = null;
+      dropWaitingClose = false;
+      dzPrompt.classList.remove("open");
+      dzPromptText.textContent = "";
+      if (dzPopActions) dzPopActions.style.display = "";
+    }
+    function showDropPrompt() {
+      if (dropWaitingClose || dropPromptCurrent || !dropPromptQueue.length) {
+        if (!dropPromptCurrent && !dropWaitingClose) hideDropPrompt();
+        return;
+      }
+      dropPromptCurrent = dropPromptQueue.shift();
+      const waiting = dropPromptQueue.length ? ` · ${dropPromptQueue.length} more` : "";
+      dzPromptText.textContent = `Dropzone ${dropPromptCurrent.container} to ${dropPromptCurrent.dropzone}?${waiting}`;
+      if (dzPopActions) dzPopActions.style.display = "";
+      dzPrompt.classList.add("open");
+    }
+    function maybeAskDropzone(containerId, result) {
+      const ask = dzAsk.checked === true;
+      const outer = priorOuterLabel(outerLocationLabel(result), rememberedPrior(containerId));
+      const offer = stationsDropPrompt(ask, outerLocationLabel(result), containerId);
+      rememberDropzone({
+        container: cellText(containerId),
+        outer,
+        ask,
+        dropzone: offer?.dropzone || "",
+        step: offer ? "asked" : ask ? "skipped" : "off",
+      });
+      if (!offer) return;
+      dropPromptQueue.push({ ...offer, outer });
+      showDropPrompt();
+    }
+    function finishDropPrompt(accept) {
+      const offer = dropPromptCurrent;
+      if (!accept) {
+        if (offer) {
+          rememberDropzone({
+            container: offer.container,
+            outer: "rcCRetStations",
+            ask: true,
+            dropzone: offer.dropzone,
+            step: "no",
+          });
+        }
+        hideDropPrompt();
+        showDropPrompt();
+        return;
+      }
+      if (offer) {
+        rememberPriorOuter(offer.container, offer.outer || "rcCRetStations");
+        rememberDropzone({
+          container: offer.container,
+          outer: offer.outer || "rcCRetStations",
+          ask: true,
+          dropzone: offer.dropzone,
+          step: "yes",
+        });
+        const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
+        if (dropped) {
+          paintDropzoneStatus(`Opening Move App for ${dropped.container}`);
+          ensureMoveTab();
+        }
+      }
+      dropWaitingClose = true;
+      dzPromptText.textContent = offer
+        ? `Dropping ${offer.container} to ${offer.dropzone}`
+        : "Dropping";
+      if (dzPopActions) dzPopActions.style.display = "none";
+      dzPrompt.classList.add("open");
+    }
+    function dropTabClosed() {
+      if (!dropWaitingClose) return;
+      hideDropPrompt();
+      showDropPrompt();
+    }
+    dzAsk.addEventListener("change", () => {
+      GM_setValue(KEYS.dropzoneAsk, dzAsk.checked === true);
+      if (!dzAsk.checked) {
+        dropPromptQueue.splice(0, dropPromptQueue.length);
+        hideDropPrompt();
+      }
+      paintAskState();
+    });
+    shadow.getElementById("dzYes").addEventListener("click", () => finishDropPrompt(true));
+    shadow.getElementById("dzNo").addEventListener("click", () => finishDropPrompt(false));
+    GM_addValueChangeListener(KEYS.dropzoneHeartbeat, (_name, _old, value) => {
+      if (Number(value) === 0) dropTabClosed();
+    });
+    GM_addValueChangeListener(KEYS.dropzoneStatus, (_name, _old, res) => {
+      if (!res) return;
+      rememberDropzone({
+        container: cellText(res.container),
+        dropzone: cellText(res.dropzone),
+        step: res.ok ? "sent" : "not sent",
+        error: cellText(res.error),
+        detail: cellText(res.detail),
+      });
+      paintDropzoneStatus(
+        res.ok
+          ? `Sent ${res.container} → ${res.dropzone}`
+          : `Not sent ${res.container}: ${res.error || "failed"}`
+      );
+      if (!res.ok) return;
+      const id = cellText(res.container).toLowerCase();
+      const hit = recent.find((row) => cellText(row.id).toLowerCase() === id && row.record);
+      if (hit) hit.record = { ...hit.record, dropped: "Dropped" };
+      enqueueSave(() => markContainerDropped(res.container)).catch(() => {});
+    });
+    paintAskState();
 
     renderStats();
     tick();
@@ -4353,5 +5538,73 @@
     tryBoot();
     [400, 1200, 3000, 6000].forEach((ms) => setTimeout(tryBoot, ms));
     setInterval(tryBoot, 2000);
+  }
+
+  if (isMoveApp && isTop) {
+    const bootMove = () => {
+      if (!document.documentElement) return;
+      startMoveDropzoneWorker();
+      let onScan = false;
+      try {
+        const parsed = new URL(location.href);
+        onScan = /aft-moveapp/i.test(parsed.hostname)
+          && /\/move-container(?:\/|$)/i.test(parsed.pathname)
+          && parsed.searchParams.get("jobId") === "200";
+      } catch {
+        onScan = false;
+      }
+      const onMenu = /fc-?menu/i.test(document.title + " " + location.href);
+      if (onMenu) {
+        const left = Number(GM_getValue("plf.dropzoneMenuLeave", 0)) || 0;
+        if (Date.now() - left > 20000) {
+          GM_setValue("plf.dropzoneMenuLeave", Date.now());
+          location.assign(MOVE_URL);
+        }
+        return;
+      }
+      if (onScan && !/404|not found/i.test(document.title)) return;
+      if (!bootMove.sent) {
+        bootMove.sent = true;
+        location.assign(MOVE_URL);
+      }
+    };
+    bootMove();
+    [400, 1200, 3000].forEach((ms) => setTimeout(bootMove, ms));
+  }
+
+  if (isFcMenu && isTop) {
+    const showFcMenu = (text) => {
+      const paint = () => {
+        if (!document.documentElement) return;
+        let el = document.getElementById("plf-move-badge");
+        if (!el) {
+          el = document.createElement("div");
+          el.id = "plf-move-badge";
+          el.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:2147483647;background:#111111;color:#ffffff;font:700 14px Segoe UI,sans-serif;padding:8px 10px;border-radius:8px;max-width:420px;";
+          document.documentElement.appendChild(el);
+        }
+        el.textContent = text;
+      };
+      paint();
+      document.addEventListener("DOMContentLoaded", paint);
+    };
+    const note = () => {
+      noteMoveLanded();
+      GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+    };
+    note();
+    rememberDropzone({ step: "fcmenu", dropzone: location.href });
+    const pack = GM_getValue(KEYS.dropzoneQueue, null);
+    const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
+    const pending = (Array.isArray(pack?.jobs) ? pack.jobs : []).some((job) => job && Number(job.n) > cursor);
+    const left = Number(GM_getValue("plf.dropzoneMenuLeave", 0)) || 0;
+    if (pending && Date.now() - left > 20000) {
+      GM_setValue("plf.dropzoneMenuLeave", Date.now());
+      showFcMenu("FC Menu opened. Going back to the scan page.");
+      location.replace(MOVE_URL);
+    } else {
+      showFcMenu("This is FC Menu, not the scan page.");
+      setInterval(note, 4000);
+    }
   }
 })();
