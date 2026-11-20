@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.0
+// @version      2.10.1
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.0";
+  const VERSION = "2.10.1";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -94,7 +94,9 @@
     dropzoneLanded: "plf.dropzoneLanded",
     dropzoneNudge: "plf.dropzoneNudge",
     dropzoneTrace: "plf.dropzoneTrace",
+    moveCheckAt: "plf.moveCheckAt",
   };
+  const MOVE_CHECK_MS = 60 * 60 * 1000;
   const IDLE_LOCATION_MS = 10 * 60 * 1000;
   const TOTAL_SHEET = "TOTAL";
   const PRESET_LOCATIONS = [
@@ -2478,15 +2480,21 @@
     return /move successful/i.test(after) && moved(after) && !moved(before);
   }
 
-  function moveDropAccepted(before, after, token, container) {
+  function moveCheckDue(at, now) {
+    const stamp = Number(at) || 0;
+    const clock = Number(now) || 0;
+    if (!stamp || !clock) return true;
+    return clock - stamp >= MOVE_CHECK_MS;
+  }
+
+  function moveDropAccepted(before, after, _token, container) {
     if (/fcmenu/i.test(String(after || ""))) return { ok: false, error: "FC Menu opened" };
     const problem = moveScreenProblem(after);
     if (problem) return { ok: false, error: problem };
     const bad = moveBadPhrase(before, after);
     if (bad) return { ok: false, error: bad };
-    const shown = cellText(token) && moveTokenCount(after, token) > moveTokenCount(before, token);
-    if (shown || containerJustMoved(before, after, container)) return { ok: true, error: "" };
-    return { ok: false, error: "Page did not show " + cellText(token) };
+    if (containerJustMoved(before, after, container)) return { ok: true, error: "" };
+    return { ok: false, error: "Page did not show the container moved" };
   }
 
   function moveIsScanPage(href, title) {
@@ -2577,6 +2585,12 @@
     const job = backgroundDropzone(true, dropzone, container);
     if (!job) return null;
     const pack = GM_getValue(KEYS.dropzoneQueue, { n: 0, jobs: [] }) || { n: 0, jobs: [] };
+    const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
+    const id = job.container.toLowerCase();
+    const pending = (Array.isArray(pack.jobs) ? pack.jobs : []).some((item) => (
+      item && Number(item.n) > cursor && cellText(item.container).toLowerCase() === id
+    ));
+    if (pending) return null;
     const n = Number(pack.n || 0) + 1;
     const jobs = [...(Array.isArray(pack.jobs) ? pack.jobs : []), { n, container: job.container, dropzone: job.dropzone, t: Date.now() }];
     GM_setValue(KEYS.dropzoneQueue, { n, jobs: jobs.slice(-30) });
@@ -2585,6 +2599,7 @@
 
   let moveTabOpenedAt = 0;
   function ensureMoveTab() {
+    if (moveCheckDue(GM_getValue(KEYS.moveCheckAt, 0), Date.now())) return;
     GM_setValue(KEYS.dropzoneTried, { href: MOVE_URL, t: Date.now() });
     GM_setValue(KEYS.dropzoneNudge, Date.now());
     rememberDropzone({ step: "opening", dropzone: MOVE_URL });
@@ -3140,6 +3155,7 @@
   let moveSawJob = false;
   const moveTabId = Math.random().toString(36).slice(2);
   async function closeMoveTabWhenDone() {
+    if (Number(GM_getValue("plf.moveCheckHold", 0)) > 0) return;
     const pack = GM_getValue(KEYS.dropzoneQueue, null);
     const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
     const pending = (Array.isArray(pack?.jobs) ? pack.jobs : []).filter((job) => job && Number(job.n) > cursor);
@@ -3154,9 +3170,11 @@
   }
 
   async function drainDropzones() {
+    if (Number(GM_getValue("plf.moveCheckHold", 0)) > 0) return;
     if (drainDropzones.working) return;
     drainDropzones.working = true;
     try {
+      let dropSucceeded = false;
       for (;;) {
         const pack = GM_getValue(KEYS.dropzoneQueue, null);
         const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
@@ -3189,8 +3207,10 @@
           detail: clip(result.detail || "", 240),
           t: Date.now(),
         });
+        dropSucceeded = Boolean(result.ok);
+        if (!result.ok) break;
       }
-      await closeMoveTabWhenDone();
+      if (dropSucceeded) await closeMoveTabWhenDone();
     } finally {
       drainDropzones.working = false;
     }
@@ -3573,6 +3593,15 @@
           box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
         #dzPromptText { font-size: 18px; font-weight: 800; line-height: 1.3; }
+        #dzCheck { display: none; flex-direction: column; gap: 8px; }
+        #dzCheck.show { display: flex; }
+        #dzCheckText { font-size: 15px; font-weight: 700; line-height: 1.35; }
+        #dzCheckBtn {
+          height: 42px; font-size: 16px; font-weight: 800;
+          display: flex; align-items: center; justify-content: center;
+          background: #111111; color: #ffffff; border: 2px solid #111111;
+          border-radius: 8px; text-decoration: none;
+        }
         .dzpop-actions { display: flex; gap: 8px; }
         .dzpop-actions button { height: 42px; flex: 1; font-size: 16px; font-weight: 800; }
         #dzYes { background: #111111; color: #ffffff; border-color: #111111; }
@@ -3962,6 +3991,10 @@
       <div class="dzpop" id="dzPrompt">
         <div class="dzpop-card">
           <div id="dzPromptText"></div>
+          <div id="dzCheck">
+            <div id="dzCheckText"></div>
+            <a id="dzCheckBtn" href="${MOVE_URL}" target="_blank" rel="noopener">Check</a>
+          </div>
           <div class="dzpop-actions" id="dzPopActions">
             <button id="dzYes" type="button">Yes</button>
             <button id="dzNo" type="button">No</button>
@@ -4901,9 +4934,16 @@
     const dzPrompt = shadow.getElementById("dzPrompt");
     const dzPromptText = shadow.getElementById("dzPromptText");
     const dzPopActions = shadow.getElementById("dzPopActions");
+    const dzCheck = shadow.getElementById("dzCheck");
+    const dzCheckText = shadow.getElementById("dzCheckText");
+    const dzCheckBtn = shadow.getElementById("dzCheckBtn");
     const dropPromptQueue = [];
     let dropPromptCurrent = null;
     let dropWaitingClose = false;
+    let dropHold = null;
+    let dropPhase = "";
+    let dropSawTab = false;
+    let dropCheckTimer = 0;
     dzAsk.checked = GM_getValue(KEYS.dropzoneAsk, false) === true;
 
     function paintDropzoneStatus(text) {
@@ -4912,11 +4952,59 @@
     function paintAskState() {
       paintDropzoneStatus(dzAsk.checked ? `On · rcCRetStations asks for ${STATIONS_DROPZONE}` : "Off");
     }
+    function moveTabOpen() {
+      const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
+      return Date.now() - heartbeat < HEARTBEAT_STALE_MS;
+    }
+    function hideMoveCheck() {
+      dzCheck?.classList.remove("show");
+      if (dzCheckText) dzCheckText.textContent = "";
+      if (dzCheckBtn) dzCheckBtn.style.display = "";
+    }
+    function showMoveCheck() {
+      if (!dzCheck || !dzCheckText) return;
+      const due = moveCheckDue(GM_getValue(KEYS.moveCheckAt, 0), Date.now());
+      const open = moveTabOpen();
+      dzCheck.classList.add("show");
+      if (dzCheckBtn) dzCheckBtn.style.display = due ? "" : "none";
+      if (due && open) {
+        dzCheckText.textContent = "Open Move App. There cannot be another tab open with the move tool. Close that tab, then click Check.";
+      } else if (due) {
+        dzCheckText.textContent = "Open Move App. There cannot be another tab open with the move tool.";
+      } else {
+        dzCheckText.textContent = "There cannot be another tab open with the move tool. Close it. The drop starts after it closes.";
+      }
+    }
+    function beginDropScan() {
+      if (dropPhase === "dropping" || !dropHold) return;
+      if (moveTabOpen()) {
+        dropPhase = "wait-close";
+        return;
+      }
+      if (moveCheckDue(GM_getValue(KEYS.moveCheckAt, 0), Date.now())) {
+        dropPhase = "wait-check";
+        return;
+      }
+      const offer = dropHold;
+      dropPhase = "dropping";
+      hideMoveCheck();
+      GM_setValue("plf.moveCheckHold", 0);
+      const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
+      if (dropped) {
+        paintDropzoneStatus(`Opening Move App for ${dropped.container}`);
+        ensureMoveTab();
+      }
+    }
     function hideDropPrompt() {
       dropPromptCurrent = null;
       dropWaitingClose = false;
+      dropHold = null;
+      dropPhase = "";
+      dropSawTab = false;
+      clearTimeout(dropCheckTimer);
       dzPrompt.classList.remove("open");
       dzPromptText.textContent = "";
+      hideMoveCheck();
       if (dzPopActions) dzPopActions.style.display = "";
     }
     function showDropPrompt() {
@@ -4934,14 +5022,20 @@
       const ask = dzAsk.checked === true;
       const outer = priorOuterLabel(outerLocationLabel(result), rememberedPrior(containerId));
       const offer = stationsDropPrompt(ask, outerLocationLabel(result), containerId);
+      const sameId = cellText(containerId).toLowerCase();
+      const already = Boolean(sameId) && (
+        (dropHold && cellText(dropHold.container).toLowerCase() === sameId)
+        || (dropPromptCurrent && cellText(dropPromptCurrent.container).toLowerCase() === sameId)
+        || dropPromptQueue.some((item) => cellText(item.container).toLowerCase() === sameId)
+      );
       rememberDropzone({
         container: cellText(containerId),
         outer,
         ask,
         dropzone: offer?.dropzone || "",
-        step: offer ? "asked" : ask ? "skipped" : "off",
+        step: already ? "already" : offer ? "asked" : ask ? "skipped" : "off",
       });
-      if (!offer) return;
+      if (!offer || already) return;
       dropPromptQueue.push({ ...offer, outer });
       showDropPrompt();
     }
@@ -4970,11 +5064,16 @@
           dropzone: offer.dropzone,
           step: "yes",
         });
-        const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
-        if (dropped) {
-          paintDropzoneStatus(`Opening Move App for ${dropped.container}`);
-          ensureMoveTab();
-        }
+        dropHold = { container: offer.container, dropzone: offer.dropzone, outer: offer.outer || "rcCRetStations" };
+        dropPhase = "wait-check";
+        dropSawTab = false;
+        clearTimeout(dropCheckTimer);
+        dropCheckTimer = setTimeout(() => {
+          if (dropPhase === "dropping" || dropPhase === "") return;
+          showMoveCheck();
+          beginDropScan();
+        }, 3000);
+        beginDropScan();
       }
       dropWaitingClose = true;
       dzPromptText.textContent = offer
@@ -4984,7 +5083,15 @@
       dzPrompt.classList.add("open");
     }
     function dropTabClosed() {
-      if (!dropWaitingClose) return;
+      if (dropPhase === "check-open" && dropSawTab) {
+        beginDropScan();
+        return;
+      }
+      if (dropPhase === "wait-close") {
+        beginDropScan();
+        return;
+      }
+      if (!dropWaitingClose || dropPhase !== "dropping") return;
       hideDropPrompt();
       showDropPrompt();
     }
@@ -4998,6 +5105,27 @@
     });
     shadow.getElementById("dzYes").addEventListener("click", () => finishDropPrompt(true));
     shadow.getElementById("dzNo").addEventListener("click", () => finishDropPrompt(false));
+    dzCheckBtn?.addEventListener("click", (e) => {
+      if (moveTabOpen()) {
+        e.preventDefault();
+        if (dzCheckText) dzCheckText.textContent = "There cannot be another tab open with the move tool. Close it, then click Check.";
+        return;
+      }
+      GM_setValue(KEYS.moveCheckAt, Date.now());
+      GM_setValue("plf.moveCheckHold", Date.now());
+      dropPhase = "check-open";
+      dropSawTab = false;
+      if (dzCheckText) dzCheckText.textContent = "Move App is open. Close that tab. There cannot be another tab open with the move tool. The drop starts after it closes.";
+    });
+    setInterval(() => {
+      if (dropPhase === "check-open" && moveTabOpen()) dropSawTab = true;
+      if (dropPhase === "check-open" && dropSawTab && !moveTabOpen()) beginDropScan();
+      if (dropPhase === "wait-close" && !moveTabOpen()) beginDropScan();
+      if (dropPhase === "failed" && !moveTabOpen()) {
+        hideDropPrompt();
+        showDropPrompt();
+      }
+    }, 1000);
     GM_addValueChangeListener(KEYS.dropzoneHeartbeat, (_name, _old, value) => {
       if (Number(value) === 0) dropTabClosed();
     });
@@ -5015,7 +5143,13 @@
           ? `Sent ${res.container} → ${res.dropzone}`
           : `Not sent ${res.container}: ${res.error || "failed"}`
       );
-      if (!res.ok) return;
+      if (!res.ok) {
+        if (dropPhase === "dropping") {
+          dropPhase = "failed";
+          dzPromptText.textContent = `Not sent ${cellText(res.container)}. ${cellText(res.error) || "The move did not finish."}`;
+        }
+        return;
+      }
       const id = cellText(res.container).toLowerCase();
       const hit = recent.find((row) => cellText(row.id).toLowerCase() === id && row.record);
       if (hit) hit.record = { ...hit.record, dropped: "Dropped" };
@@ -5544,6 +5678,7 @@
     const bootMove = () => {
       if (!document.documentElement) return;
       startMoveDropzoneWorker();
+      if (Number(GM_getValue("plf.moveCheckHold", 0)) > 0) return;
       let onScan = false;
       try {
         const parsed = new URL(location.href);
@@ -5598,7 +5733,7 @@
     const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
     const pending = (Array.isArray(pack?.jobs) ? pack.jobs : []).some((job) => job && Number(job.n) > cursor);
     const left = Number(GM_getValue("plf.dropzoneMenuLeave", 0)) || 0;
-    if (pending && Date.now() - left > 20000) {
+    if (pending && Number(GM_getValue("plf.moveCheckHold", 0)) <= 0 && Date.now() - left > 20000) {
       GM_setValue("plf.dropzoneMenuLeave", Date.now());
       showFcMenu("FC Menu opened. Going back to the scan page.");
       location.replace(MOVE_URL);
