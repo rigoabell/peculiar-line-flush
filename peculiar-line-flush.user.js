@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.1
+// @version      2.10.2
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.1";
+  const VERSION = "2.10.2";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -3547,6 +3547,13 @@
           font-size: 18px; line-height: 1;
         }
         .x:hover { background: #8f1c14; color: #ffffff; }
+        .move-check {
+          flex: 0 0 auto; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+          padding: 0 10px; border: 2px solid #111111; border-radius: 7px;
+          background: #ffe14a; color: #111111; font-size: 12px; font-weight: 800;
+          text-decoration: none;
+        }
+        .move-check:hover { background: #ffd000; color: #111111; }
         .scanrow {
           display: flex; align-items: center; gap: 8px;
           padding: 8px 10px; background: #ffffff;
@@ -3838,6 +3845,7 @@
             </div>
             <div class="counts" id="counts"></div>
                 <div class="clock" id="clock">00:00:00</div>
+            <a id="moveCheck" class="move-check" href="${MOVE_URL}" target="_blank" rel="noopener" title="Open Move App. There cannot be another tab open with the move tool.">Check</a>
             <button id="share" type="button" title="Share the Tampermonkey install link">Share</button>
             <button id="debug" title="Copy debug JSON">Debug</button>
             <select id="panelSize" title="Panel size. Screen matches your display. +25% and +50% make this panel bigger.">
@@ -5105,18 +5113,25 @@
     });
     shadow.getElementById("dzYes").addEventListener("click", () => finishDropPrompt(true));
     shadow.getElementById("dzNo").addEventListener("click", () => finishDropPrompt(false));
-    dzCheckBtn?.addEventListener("click", (e) => {
+    function armMoveCheck(e) {
       if (moveTabOpen()) {
         e.preventDefault();
-        if (dzCheckText) dzCheckText.textContent = "There cannot be another tab open with the move tool. Close it, then click Check.";
+        paintDropzoneStatus("There cannot be another tab open with the move tool. Close it, then click Check.");
+        if (dzCheckText && dzCheck?.classList.contains("show")) {
+          dzCheckText.textContent = "There cannot be another tab open with the move tool. Close it, then click Check.";
+        }
         return;
       }
       GM_setValue(KEYS.moveCheckAt, Date.now());
       GM_setValue("plf.moveCheckHold", Date.now());
+      paintDropzoneStatus("Move App is open. Close that tab. There cannot be another tab open with the move tool.");
+      if (!dropHold || dropPhase === "dropping" || dropPhase === "failed") return;
       dropPhase = "check-open";
       dropSawTab = false;
       if (dzCheckText) dzCheckText.textContent = "Move App is open. Close that tab. There cannot be another tab open with the move tool. The drop starts after it closes.";
-    });
+    }
+    dzCheckBtn?.addEventListener("click", armMoveCheck);
+    shadow.getElementById("moveCheck")?.addEventListener("click", armMoveCheck);
     setInterval(() => {
       if (dropPhase === "check-open" && moveTabOpen()) dropSawTab = true;
       if (dropPhase === "check-open" && dropSawTab && !moveTabOpen()) beginDropScan();
