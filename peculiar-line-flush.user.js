@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.2
+// @version      2.10.13
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -15,6 +15,7 @@
 // @match        https://aft-moveapp.na.aftx.amazonoperations.app/*
 // @match        https://aft-moveapp.eu.aftx.amazonoperations.app/*
 // @match        https://aft-moveapp.fe.aftx.amazonoperations.app/*
+// @match        https://menu.na.aft.amazonoperations.app/*
 // @include      /^https:\/\/fcmenu-[a-z0-9-]+\.corp\.amazon\.com(\/.*)?$/
 // @match        https://fcmenu-iad-regionalized.corp.amazon.com/*
 // @match        https://fcmenu-dub-regionalized.corp.amazon.com/*
@@ -30,6 +31,7 @@
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
+// @grant        window.close
 // ==/UserScript==
 
 /*
@@ -39,7 +41,7 @@
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
   A night that runs past midnight keeps that same file until 6:00 AM. At 6:00 AM the next file starts.
-  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL on the open Move App scan page.
+  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL. Check opens the MEM3 menu, types 147, and the site opens the Move App. Move containers individually then opens job 200.
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
   EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
@@ -54,13 +56,14 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.2";
+  const VERSION = "2.10.13";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
   const OLD_SCRIPT_NAME = "Peculiar Inventory Scan Panel";
   const PECULIAR_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
   const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=200";
+  const MENU_URL = "https://menu.na.aft.amazonoperations.app/MEM3";
   const SP_SITE = "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com";
   const SOS_FOLDER =
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/Line Flush Records";
@@ -95,6 +98,7 @@
     dropzoneNudge: "plf.dropzoneNudge",
     dropzoneTrace: "plf.dropzoneTrace",
     moveCheckAt: "plf.moveCheckAt",
+    moveChecks: "plf.moveChecks",
   };
   const MOVE_CHECK_MS = 60 * 60 * 1000;
   const IDLE_LOCATION_MS = 10 * 60 * 1000;
@@ -146,6 +150,7 @@
   const host = location.hostname;
   const isPeculiar = /peculiar-inventory|aft-aging-inventory/i.test(host);
   const isMoveApp = /aft-moveapp/i.test(host);
+  const isAftMenu = /menu\.na\.aft\.amazonoperations\.app/i.test(host);
   const isFcMenu = /^fcmenu-[a-z0-9-]+\.corp\.amazon\.com$/i.test(host);
   const isLoginChooser = /idp-selection|federated-auth\.aft\.a2z\.com|qifcr\.na\.aftx\.amazonoperations\.app/i.test(location.href);
   const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
@@ -154,6 +159,54 @@
     isTop = pageWindow.top === pageWindow.self;
   } catch {
     isTop = false;
+  }
+  function patchMoveKeyListeners(win) {
+    let proto;
+    try {
+      proto = win.EventTarget && win.EventTarget.prototype;
+    } catch {
+      return;
+    }
+    if (!proto || proto.__plfMovePatched || typeof proto.addEventListener !== "function") return;
+    const wrapMap = new WeakMap();
+    const origAdd = proto.addEventListener;
+    const origRemove = proto.removeEventListener;
+    const keyEvents = new Set(["keydown", "keypress", "keyup"]);
+    try {
+      proto.addEventListener = function(type, listener, options) {
+        if (!listener || !keyEvents.has(type)) return origAdd.call(this, type, listener, options);
+        let wrapped = wrapMap.get(listener);
+        if (!wrapped) {
+          wrapped = function(event) {
+            try {
+              const target = event && event.target;
+              if (target && typeof target.closest === "function" && target.closest("#dz-batch-panel, [id^='plf-']")) return;
+            } catch {
+              /* Deliver the event. */
+            }
+            if (typeof listener === "function") return listener.apply(this, arguments);
+            if (listener && typeof listener.handleEvent === "function") return listener.handleEvent(event);
+          };
+          try {
+            wrapMap.set(listener, wrapped);
+          } catch {
+            return origAdd.call(this, type, listener, options);
+          }
+        }
+        return origAdd.call(this, type, wrapped, options);
+      };
+      proto.removeEventListener = function(type, listener, options) {
+        const wrapped = listener ? wrapMap.get(listener) : null;
+        return origRemove.call(this, type, wrapped || listener, options);
+      };
+      proto.__plfMovePatched = true;
+    } catch {
+      /* The page locked its event prototype. The scan still runs. */
+    }
+  }
+  if (isMoveApp && isTop) {
+    patchMoveKeyListeners(window);
+    try { patchMoveKeyListeners(pageWindow); } catch { /* This frame has no page window. */ }
   }
   let onScanKey = null;
   let restoreScanFocus = null;
@@ -2480,6 +2533,16 @@
     return /move successful/i.test(after) && moved(after) && !moved(before);
   }
 
+  function moveTabStillOpen(heartbeat, hidden, now, staleMs) {
+    const beat = Number(heartbeat) || 0;
+    const closed = Number(hidden) || 0;
+    const clock = Number(now) || 0;
+    const stale = Number(staleMs) || 0;
+    if (!beat || !clock || clock - beat >= stale) return false;
+    if (closed >= beat) return false;
+    return true;
+  }
+
   function moveCheckDue(at, now) {
     const stamp = Number(at) || 0;
     const clock = Number(now) || 0;
@@ -2487,14 +2550,81 @@
     return clock - stamp >= MOVE_CHECK_MS;
   }
 
-  function moveDropAccepted(before, after, _token, container) {
+  function halfHourSlot(now) {
+    const clock = new Date(Number(now) || 0);
+    if (Number.isNaN(clock.getTime())) return "";
+    const pad = (n) => String(n).padStart(2, "0");
+    const minutes = clock.getMinutes() < 30 ? "00" : "30";
+    return `${clock.getFullYear()}-${pad(clock.getMonth() + 1)}-${pad(clock.getDate())}T${pad(clock.getHours())}:${minutes}`;
+  }
+
+  function moveCheckDone(record, now) {
+    const slot = halfHourSlot(now);
+    if (!slot || !record || typeof record !== "object") return false;
+    return Number(record[slot]) > 0;
+  }
+
+  function markMoveCheck(record, slot, now) {
+    const key = cellText(slot);
+    const book = record && typeof record === "object" ? record : {};
+    const next = {};
+    const day = key.slice(0, 10);
+    Object.keys(book).forEach((name) => {
+      if (day && String(name).startsWith(day) && Number(book[name]) > 0) next[name] = Number(book[name]);
+    });
+    if (key) next[key] = Number(now) || Date.now();
+    return next;
+  }
+
+  function moveBatchBadPhrase(before, after) {
+    const needles = [
+      "invalid",
+      "not found",
+      "unknown barcode",
+      "unsuccessful",
+      "not be moved",
+      "can not",
+      "cannot",
+      "can't",
+      "does not",
+      "doesn't",
+      "unrecognized",
+      "no such",
+      "already scanned",
+      "try a different",
+      "try again",
+      "failed",
+      "error",
+      "unknown",
+    ];
+    const prev = String(before || "").toLowerCase();
+    const next = String(after || "").toLowerCase();
+    for (const phrase of needles) {
+      if (next.includes(phrase) && !prev.includes(phrase)) return phrase;
+    }
+    return "";
+  }
+
+  function moveBatchContainerAccepted(before, after) {
+    const problem = moveScreenProblem(after);
+    if (problem) return { ok: false, error: problem };
+    const bad = moveBatchBadPhrase(before, after);
+    if (bad) return { ok: false, error: bad };
+    if (moveStableText(after) === moveStableText(before)) return { ok: false, error: "Page did not change" };
+    return { ok: true, error: "" };
+  }
+
+  function moveDropAccepted(before, after, _token, _container) {
     if (/fcmenu/i.test(String(after || ""))) return { ok: false, error: "FC Menu opened" };
     const problem = moveScreenProblem(after);
     if (problem) return { ok: false, error: problem };
-    const bad = moveBadPhrase(before, after);
+    const bad = moveBatchBadPhrase(before, after);
     if (bad) return { ok: false, error: bad };
-    if (containerJustMoved(before, after, container)) return { ok: true, error: "" };
-    return { ok: false, error: "Page did not show the container moved" };
+    if (moveStableText(after) === moveStableText(before)) return { ok: false, error: "Page did not change" };
+    if (!/move successful/i.test(after) || /move successful/i.test(before)) {
+      return { ok: false, error: "Page did not say Move Successful" };
+    }
+    return { ok: true, error: "" };
   }
 
   function moveIsScanPage(href, title) {
@@ -2597,22 +2727,87 @@
     return job;
   }
 
+  function forgetQueuedContainer(container) {
+    const id = cellText(container).toLowerCase();
+    if (!id) return;
+    const pack = GM_getValue(KEYS.dropzoneQueue, null);
+    if (!pack) return;
+    const jobs = (Array.isArray(pack.jobs) ? pack.jobs : []).filter((job) => cellText(job?.container).toLowerCase() !== id);
+    GM_setValue(KEYS.dropzoneQueue, { ...pack, jobs });
+  }
+
+  function noteMoveCheckAttempt() {
+    const slot = cellText(GM_getValue("plf.checkSlot", ""));
+    if (!slot) return;
+    const now = Date.now();
+    GM_setValue(KEYS.moveChecks, markMoveCheck(GM_getValue(KEYS.moveChecks, null), slot, now));
+    GM_setValue("plf.checkSlot", "");
+    rememberDropzone({ step: "check-slot", dropzone: slot });
+  }
+
   let moveTabOpenedAt = 0;
   function ensureMoveTab() {
-    if (moveCheckDue(GM_getValue(KEYS.moveCheckAt, 0), Date.now())) return;
-    GM_setValue(KEYS.dropzoneTried, { href: MOVE_URL, t: Date.now() });
-    GM_setValue(KEYS.dropzoneNudge, Date.now());
-    rememberDropzone({ step: "opening", dropzone: MOVE_URL });
+    const now = Date.now();
+    const checking = !moveCheckDone(GM_getValue(KEYS.moveChecks, null), now);
+    const href = checking ? MENU_URL : MOVE_URL;
     const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
-    if (Date.now() - heartbeat < HEARTBEAT_STALE_MS) return;
+    const hidden = Number(GM_getValue("plf.moveTabHidden", 0)) || 0;
+    if (moveTabStillOpen(heartbeat, hidden, Date.now(), HEARTBEAT_STALE_MS)) return;
     if (Date.now() - moveTabOpenedAt < 4000) return;
     moveTabOpenedAt = Date.now();
+    if (checking) {
+      GM_setValue("plf.menuDrive", now);
+      GM_setValue("plf.menu147Done", 0);
+      GM_setValue("plf.checkSlot", halfHourSlot(now));
+    } else {
+      GM_setValue("plf.menuDrive", 0);
+    }
+    GM_setValue(KEYS.dropzoneTried, { href, t: Date.now() });
+    GM_setValue(KEYS.dropzoneNudge, Date.now());
+    rememberDropzone({ step: "opening", dropzone: href });
     GM_setValue("plf.dropzoneClaim", { n: 0, t: 0, tab: "" });
     try {
-      GM_openInTab(MOVE_URL, { active: true, insert: true, setParent: true });
+      GM_openInTab(href, { active: true, insert: true, setParent: true });
     } catch {
-      /* The Move App tab could not be opened. */
+      /* The drop tab could not be opened. */
     }
+  }
+
+  function onJob200() {
+    try {
+      const parsed = new URL(location.href);
+      return /aft-moveapp/i.test(parsed.hostname)
+        && /\/move-container(?:\/|$)/i.test(parsed.pathname)
+        && parsed.searchParams.get("jobId") === "200";
+    } catch {
+      return false;
+    }
+  }
+
+  function onMoveMenu() {
+    try {
+      const parsed = new URL(location.href);
+      return /aft-moveapp/i.test(parsed.hostname)
+        && /\/move-container\/?$/i.test(parsed.pathname)
+        && !parsed.searchParams.get("jobId");
+    } catch {
+      return false;
+    }
+  }
+
+  function clickIndividualMove() {
+    const text = document.getElementById("menu-entry-text-2");
+    const row = document.getElementById("menu-entry-move-2");
+    const el = row || text;
+    if (!el) {
+      if (!moveClickButton("Move containers individually")) return false;
+      rememberDropzone({ step: "individual", dropzone: "Move containers individually" });
+      return true;
+    }
+    movePress(el);
+    if (text && text !== el) movePress(text);
+    rememberDropzone({ step: "individual", dropzone: "Move containers individually" });
+    return true;
   }
 
   function moveEachRoot(visit) {
@@ -2844,23 +3039,24 @@
     };
   }
 
-  function moveBurstTarget() {
-    const body = document.body || document.documentElement;
-    disarmFcMenuControls();
-    const active = moveDeepActive(document);
-    if (active && active !== body && active !== document.documentElement && !moveTextField(active)) {
-      try {
-        active.blur();
-      } catch {
-        /* The focused control can stay focused. The keys still go to the page. */
+  function movePageFocus() {
+    const docs = [];
+    moveEachRoot((root) => {
+      const doc = root.nodeType === 9 ? root : root.ownerDocument;
+      if (doc && !docs.includes(doc)) docs.push(doc);
+    });
+    if (!docs.includes(document)) docs.unshift(document);
+    let fallback = document.body || document.documentElement;
+    for (const doc of docs) {
+      const el = moveDeepActive(doc);
+      if (!el || moveOwnUi(el)) continue;
+      if (el === doc.body || el === doc.documentElement) {
+        fallback = el;
+        continue;
       }
+      return el;
     }
-    try {
-      body.focus();
-    } catch {
-      /* The page body cannot take focus. The keys still go to it. */
-    }
-    return body;
+    return fallback;
   }
 
   async function burstMoveScan(text, label) {
@@ -2868,7 +3064,10 @@
     const name = label || code;
     paintMoveBadge("Sending " + name);
     try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
-    const target = moveBurstTarget();
+    disarmFcMenuControls();
+    const active = document.activeElement;
+    if (moveOwnUi(active) && typeof active.blur === "function") active.blur();
+    const target = movePageFocus();
     if (!target) return;
     for (const ch of [...Array.from(code), "Enter"]) fireMoveKey(target, ch);
   }
@@ -3101,15 +3300,15 @@
       const sig = moveStableText(raw);
       const verdict = container
         ? moveDropAccepted(beforeRaw, raw, token, container)
-        : moveScanAccepted(beforeRaw, raw, token);
+        : moveBatchContainerAccepted(beforeRaw, raw);
       if (sig !== last) {
         last = sig;
         saw = true;
         stableAt = Date.now();
-      } else if (saw && stableAt && Date.now() - stableAt >= 100) {
+      } else if (saw && stableAt && Date.now() - stableAt >= 250) {
         return { ...verdict, detail: clip(raw, 240) };
       }
-      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 100) {
+      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 250) {
         return { ...verdict, detail: clip(raw, 240) };
       }
       await sleep(40);
@@ -3117,8 +3316,22 @@
     const raw = moveScreenText();
     const verdict = container
       ? moveDropAccepted(beforeRaw, raw, token, container)
-      : moveScanAccepted(beforeRaw, raw, token);
+      : moveBatchContainerAccepted(beforeRaw, raw);
     return { ...verdict, detail: clip(raw, 240) };
+  }
+
+  async function dismissMoveRejection() {
+    const before = moveStableText(moveScreenText());
+    if (!moveClickButton("Continue")) {
+      const target = movePageFocus();
+      if (target) fireMoveKey(target, "c");
+    }
+    const start = Date.now();
+    while (Date.now() - start < 2000) {
+      if (moveStableText(moveScreenText()) !== before) return true;
+      await sleep(80);
+    }
+    return false;
   }
 
   async function performDropzone(container, dropzone) {
@@ -3126,16 +3339,21 @@
     rememberDropzone({ container, dropzone, step: "waiting" });
     const ready = await waitForMoveReady();
     if (!ready.ok) return ready;
+    noteMoveCheckAttempt();
     paintMoveBadge("1/1 scan container " + container);
     rememberDropzone({ container, dropzone, step: "tote" });
     const beforeRaw = moveScreenText();
     await burstMoveScan(container, container);
     const first = await waitForMoveToken(beforeRaw, container);
     paintMoveBadge(first.ok ? "Tote accepted: " + container : "Container was not scanned");
-    if (!first.ok) return { ok: false, error: "Container was not scanned", detail: first.detail || "" };
-    await sleep(400);
+    if (!first.ok) {
+      if (first.error !== "Page did not change") await dismissMoveRejection();
+      return { ok: false, error: first.error || "Container was not scanned", detail: first.detail || "" };
+    }
+    await sleep(200);
     const midRaw = moveScreenText();
     if (/move was unsuccessful|action failed/i.test(midRaw)) {
+      await dismissMoveRejection();
       return { ok: false, error: "The move failed", detail: clip(midRaw, 240) };
     }
     paintMoveBadge("1/1 scan dropzone " + dropzone);
@@ -3146,27 +3364,47 @@
     const detail = second.detail || first.detail || "";
     if (/fcmenu/i.test(location.href)) return { ok: false, error: "FC Menu opened", detail };
     if (!moveIsScanPage(location.href, document.title)) return { ok: false, error: "Left the scan page", detail };
-    if (!second.ok) return { ok: false, error: second.error || "Page did not show " + dropzone, detail };
+    if (!second.ok) {
+      if (second.error !== "Page did not change") await dismissMoveRejection();
+      return { ok: false, error: second.error || "Page did not say Move Successful", detail };
+    }
     return { ok: true, error: "", detail };
   }
 
   let moveWorkerStarted = false;
   let moveWorkerAt = 0;
   let moveSawJob = false;
+  let moveBeatTimer = 0;
+  let moveDrainTimer = 0;
   const moveTabId = Math.random().toString(36).slice(2);
+  function moveSuccessOnScreen() {
+    const nodes = document.querySelectorAll("span.success-step-value");
+    for (const node of nodes) {
+      if (/move successful/i.test(node.textContent || "")) return true;
+    }
+    return false;
+  }
   async function closeMoveTabWhenDone() {
-    if (Number(GM_getValue("plf.moveCheckHold", 0)) > 0) return;
+    const succeeded = moveSuccessOnScreen();
+    if (Number(GM_getValue("plf.moveCheckHold", 0)) > 0 && !succeeded) return;
     const pack = GM_getValue(KEYS.dropzoneQueue, null);
     const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
     const pending = (Array.isArray(pack?.jobs) ? pack.jobs : []).filter((job) => job && Number(job.n) > cursor);
-    if (pending.length) return;
-    if (!moveSawJob && Date.now() - moveWorkerAt < 8000) return;
+    if (pending.length && !succeeded) return;
+    if (!moveSawJob && !succeeded && Date.now() - moveWorkerAt < 8000) return;
     if (closeMoveTabWhenDone.closing) return;
     closeMoveTabWhenDone.closing = true;
+    clearInterval(moveBeatTimer);
+    clearInterval(moveDrainTimer);
     paintMoveBadge("Done. Closing this tab.");
+    rememberDropzone({ step: "closing", detail: succeeded ? "Move Successful" : "" });
     GM_setValue(KEYS.dropzoneHeartbeat, 0);
-    await sleep(400);
+    await sleep(300);
     try { window.close(); } catch { /* The browser kept this tab open. */ }
+    try { pageWindow.close(); } catch { /* The page window stayed open. */ }
+    setTimeout(() => {
+      try { window.close(); } catch { /* The browser kept this tab open. */ }
+    }, 400);
   }
 
   async function drainDropzones() {
@@ -3182,8 +3420,18 @@
           .filter((job) => job && Number(job.n) > cursor)
           .sort((a, b) => Number(a.n) - Number(b.n));
         if (!jobs.length) break;
-        moveSawJob = true;
         const job = jobs[0];
+        if (job.t && Date.now() - Number(job.t) > 3 * 60 * 1000) {
+          GM_setValue(KEYS.dropzoneCursor, Number(job.n));
+          rememberDropzone({
+            container: job.container,
+            dropzone: job.dropzone,
+            step: "not sent",
+            error: "The drop did not finish",
+          });
+          continue;
+        }
+        moveSawJob = true;
         const claim = GM_getValue("plf.dropzoneClaim", null);
         if (claim && claim.tab && claim.tab !== moveTabId && Number(claim.n) === Number(job.n) && Date.now() - (Number(claim.t) || 0) < 25000) return;
         GM_setValue("plf.dropzoneClaim", { n: Number(job.n), t: Date.now(), tab: moveTabId, href: location.href });
@@ -3222,6 +3470,11 @@
       moveWorkerAt = Date.now();
       blockFcMenuOpen();
       const beat = () => {
+        if (closeMoveTabWhenDone.closing) return;
+        if (moveSuccessOnScreen() && !drainDropzones.working) {
+          closeMoveTabWhenDone();
+          return;
+        }
         disarmFcMenuControls();
         noteMoveLanded();
         GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
@@ -3234,8 +3487,8 @@
         paintMoveBadge(movePageReady(location.href, document.title, text, document.readyState) ? "Ready to scan a container" : "Move App is open");
       };
       beat();
-      setInterval(beat, HEARTBEAT_MS);
-      setInterval(() => drainDropzones(), 1000);
+      moveBeatTimer = setInterval(beat, HEARTBEAT_MS);
+      moveDrainTimer = setInterval(() => drainDropzones(), 1000);
       GM_addValueChangeListener(KEYS.dropzoneQueue, () => {
         drainDropzones();
       });
@@ -3384,6 +3637,12 @@
         name: sosCache.name,
         records: (sosCache.records || []).length,
         sheets: (sosCache.book?.sheets || []).map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })),
+      },
+      menu: GM_getValue("plf.menuShot", null),
+      moveCheck: {
+        slot: halfHourSlot(Date.now()),
+        done: moveCheckDone(GM_getValue(KEYS.moveChecks, null), Date.now()),
+        slots: GM_getValue(KEYS.moveChecks, null),
       },
       queued: scanQueueLen,
       recent: recent.slice(0, 8).map((r) => ({ t: r.t, id: r.id, age: r.age, sku: r.sku, status: r.status })),
@@ -3606,9 +3865,10 @@
         #dzCheckBtn {
           height: 42px; font-size: 16px; font-weight: 800;
           display: flex; align-items: center; justify-content: center;
-          background: #111111; color: #ffffff; border: 2px solid #111111;
+          background: #ffe14a; color: #111111; border: 2px solid #111111;
           border-radius: 8px; text-decoration: none;
         }
+        #dzCheckBtn:hover { background: #ffd000; color: #111111; }
         .dzpop-actions { display: flex; gap: 8px; }
         .dzpop-actions button { height: 42px; flex: 1; font-size: 16px; font-weight: 800; }
         #dzYes { background: #111111; color: #ffffff; border-color: #111111; }
@@ -3845,7 +4105,7 @@
             </div>
             <div class="counts" id="counts"></div>
                 <div class="clock" id="clock">00:00:00</div>
-            <a id="moveCheck" class="move-check" href="${MOVE_URL}" target="_blank" rel="noopener" title="Open Move App. There cannot be another tab open with the move tool.">Check</a>
+            <a id="moveCheck" class="move-check" href="${MENU_URL}" target="_blank" rel="noopener" title="Open the MEM3 menu. There cannot be another tab open with the move tool.">Check</a>
             <button id="share" type="button" title="Share the Tampermonkey install link">Share</button>
             <button id="debug" title="Copy debug JSON">Debug</button>
             <select id="panelSize" title="Panel size. Screen matches your display. +25% and +50% make this panel bigger.">
@@ -3858,7 +4118,7 @@
           <div class="scanrow">
             <select id="location" title="Location"></select>
             <button id="delLoc" type="button" disabled title="Remove this custom location">Delete</button>
-            <input id="q" type="text" placeholder="Scan container" autocomplete="off" spellcheck="false" />
+            <input id="q" type="text" placeholder="Scan Container - Do Not Type Here" autocomplete="off" spellcheck="false" />
             </div>
           <div class="dzrow">
             <label for="dzAsk"><input id="dzAsk" type="checkbox" /> Ask to dropzone</label>
@@ -4001,7 +4261,7 @@
           <div id="dzPromptText"></div>
           <div id="dzCheck">
             <div id="dzCheckText"></div>
-            <a id="dzCheckBtn" href="${MOVE_URL}" target="_blank" rel="noopener">Check</a>
+            <a id="dzCheckBtn" href="${MENU_URL}" target="_blank" rel="noopener">Check</a>
           </div>
           <div class="dzpop-actions" id="dzPopActions">
             <button id="dzYes" type="button">Yes</button>
@@ -4952,6 +5212,8 @@
     let dropPhase = "";
     let dropSawTab = false;
     let dropCheckTimer = 0;
+    let dropFailTimer = 0;
+    let dropFailedId = "";
     dzAsk.checked = GM_getValue(KEYS.dropzoneAsk, false) === true;
 
     function paintDropzoneStatus(text) {
@@ -4962,7 +5224,8 @@
     }
     function moveTabOpen() {
       const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
-      return Date.now() - heartbeat < HEARTBEAT_STALE_MS;
+      const hidden = Number(GM_getValue("plf.moveTabHidden", 0)) || 0;
+      return moveTabStillOpen(heartbeat, hidden, Date.now(), HEARTBEAT_STALE_MS);
     }
     function hideMoveCheck() {
       dzCheck?.classList.remove("show");
@@ -4971,17 +5234,11 @@
     }
     function showMoveCheck() {
       if (!dzCheck || !dzCheckText) return;
-      const due = moveCheckDue(GM_getValue(KEYS.moveCheckAt, 0), Date.now());
-      const open = moveTabOpen();
       dzCheck.classList.add("show");
-      if (dzCheckBtn) dzCheckBtn.style.display = due ? "" : "none";
-      if (due && open) {
-        dzCheckText.textContent = "Open Move App. There cannot be another tab open with the move tool. Close that tab, then click Check.";
-      } else if (due) {
-        dzCheckText.textContent = "Open Move App. There cannot be another tab open with the move tool.";
-      } else {
-        dzCheckText.textContent = "There cannot be another tab open with the move tool. Close it. The drop starts after it closes.";
-      }
+      if (dzCheckBtn) dzCheckBtn.style.display = "";
+      dzCheckText.textContent = moveTabOpen()
+        ? "Open Move App. There cannot be another tab open with the move tool. Close that tab, then click Check."
+        : "Open Move App. There cannot be another tab open with the move tool.";
     }
     function beginDropScan() {
       if (dropPhase === "dropping" || !dropHold) return;
@@ -4989,17 +5246,13 @@
         dropPhase = "wait-close";
         return;
       }
-      if (moveCheckDue(GM_getValue(KEYS.moveCheckAt, 0), Date.now())) {
-        dropPhase = "wait-check";
-        return;
-      }
       const offer = dropHold;
       dropPhase = "dropping";
-      hideMoveCheck();
       GM_setValue("plf.moveCheckHold", 0);
       const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
       if (dropped) {
-        paintDropzoneStatus(`Opening Move App for ${dropped.container}`);
+        const checking = !moveCheckDone(GM_getValue(KEYS.moveChecks, null), Date.now());
+        paintDropzoneStatus(checking ? `Check, then drop ${dropped.container}` : `Opening job 200 for ${dropped.container}`);
         ensureMoveTab();
       }
     }
@@ -5009,7 +5262,9 @@
       dropHold = null;
       dropPhase = "";
       dropSawTab = false;
+      dropFailedId = "";
       clearTimeout(dropCheckTimer);
+      clearTimeout(dropFailTimer);
       dzPrompt.classList.remove("open");
       dzPromptText.textContent = "";
       hideMoveCheck();
@@ -5076,11 +5331,24 @@
         dropPhase = "wait-check";
         dropSawTab = false;
         clearTimeout(dropCheckTimer);
+        clearTimeout(dropFailTimer);
         dropCheckTimer = setTimeout(() => {
-          if (dropPhase === "dropping" || dropPhase === "") return;
+          if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "") return;
           showMoveCheck();
-          beginDropScan();
         }, 3000);
+        dropFailTimer = setTimeout(() => {
+          if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "" || !dzPrompt.classList.contains("open")) return;
+          const container = cellText(dropHold?.container);
+          const dropzone = cellText(dropHold?.dropzone);
+          const reason = "The drop did not finish";
+          dropPhase = "failed";
+          dropFailedId = container.toLowerCase();
+          dzPromptText.textContent = container ? `Not sent ${container}. ${reason}.` : reason;
+          paintDropzoneStatus(container ? `Not sent ${container}: ${reason}` : reason);
+          rememberDropzone({ container, dropzone, step: "not sent", error: reason });
+          forgetQueuedContainer(container);
+          hideMoveCheck();
+        }, 6000);
         beginDropScan();
       }
       dropWaitingClose = true;
@@ -5114,16 +5382,26 @@
     shadow.getElementById("dzYes").addEventListener("click", () => finishDropPrompt(true));
     shadow.getElementById("dzNo").addEventListener("click", () => finishDropPrompt(false));
     function armMoveCheck(e) {
+      if (e) e.preventDefault();
       if (moveTabOpen()) {
-        e.preventDefault();
+        rememberDropzone({ step: "check-blocked", detail: "A Move App tab is still open" });
         paintDropzoneStatus("There cannot be another tab open with the move tool. Close it, then click Check.");
         if (dzCheckText && dzCheck?.classList.contains("show")) {
           dzCheckText.textContent = "There cannot be another tab open with the move tool. Close it, then click Check.";
         }
         return;
       }
-      GM_setValue(KEYS.moveCheckAt, Date.now());
-      GM_setValue("plf.moveCheckHold", Date.now());
+      const now = Date.now();
+      GM_setValue(KEYS.moveCheckAt, now);
+      GM_setValue("plf.menuDrive", now);
+      GM_setValue("plf.menu147Done", 0);
+      GM_setValue("plf.moveCheckHold", now);
+      rememberDropzone({ step: "check-click", dropzone: MENU_URL });
+      try {
+        GM_openInTab(MENU_URL, { active: true, insert: true, setParent: true });
+      } catch {
+        /* The menu tab could not be opened. */
+      }
       paintDropzoneStatus("Move App is open. Close that tab. There cannot be another tab open with the move tool.");
       if (!dropHold || dropPhase === "dropping" || dropPhase === "failed") return;
       dropPhase = "check-open";
@@ -5146,6 +5424,7 @@
     });
     GM_addValueChangeListener(KEYS.dropzoneStatus, (_name, _old, res) => {
       if (!res) return;
+      if (dropFailedId && cellText(res.container).toLowerCase() === dropFailedId) return;
       rememberDropzone({
         container: cellText(res.container),
         dropzone: cellText(res.dropzone),
@@ -5692,34 +5971,186 @@
   if (isMoveApp && isTop) {
     const bootMove = () => {
       if (!document.documentElement) return;
-      startMoveDropzoneWorker();
-      if (Number(GM_getValue("plf.moveCheckHold", 0)) > 0) return;
-      let onScan = false;
-      try {
-        const parsed = new URL(location.href);
-        onScan = /aft-moveapp/i.test(parsed.hostname)
-          && /\/move-container(?:\/|$)/i.test(parsed.pathname)
-          && parsed.searchParams.get("jobId") === "200";
-      } catch {
-        onScan = false;
-      }
-      const onMenu = /fc-?menu/i.test(document.title + " " + location.href);
-      if (onMenu) {
-        const left = Number(GM_getValue("plf.dropzoneMenuLeave", 0)) || 0;
-        if (Date.now() - left > 20000) {
-          GM_setValue("plf.dropzoneMenuLeave", Date.now());
-          location.assign(MOVE_URL);
-        }
+      if (onJob200() && !/404|not found/i.test(document.title)) {
+        startMoveDropzoneWorker();
         return;
       }
-      if (onScan && !/404|not found/i.test(document.title)) return;
-      if (!bootMove.sent) {
-        bootMove.sent = true;
-        location.assign(MOVE_URL);
+      const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+      const driving = started > 0 && Date.now() - started < 2 * 60 * 1000;
+      const holding = Number(GM_getValue("plf.moveCheckHold", 0)) > 0;
+      const pack = GM_getValue(KEYS.dropzoneQueue, null);
+      const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
+      const pending = (Array.isArray(pack?.jobs) ? pack.jobs : []).some((job) => job && Number(job.n) > cursor);
+      const menu = onMoveMenu() || Boolean(document.getElementById("menu-entry-text-2") || document.getElementById("menu-entry-move-2"));
+      if ((!driving && !holding && !pending) || !menu) return;
+      if (clickIndividualMove()) return;
+      if (driving && !bootMove.typed && document.body && Date.now() - started > 2000) {
+        bootMove.typed = true;
+        const target = document.body;
+        try { target.focus(); } catch { /* The menu kept focus. */ }
+        fireMoveKey(target, "2");
+        fireMoveKey(target, "Enter");
+        rememberDropzone({ step: "individual-2", dropzone: "2" });
       }
     };
     bootMove();
     [400, 1200, 3000].forEach((ms) => setTimeout(bootMove, ms));
+  }
+
+  function launcherField() {
+    return document.getElementById("qlInput");
+  }
+
+  function calmCodeField() {
+    return document.getElementById("calmCode") || document.querySelector("[name='calmCode']");
+  }
+
+  function visibleMenuField() {
+    let best = null;
+    let area = 0;
+    document.querySelectorAll("input, textarea").forEach((el) => {
+      if (el.disabled || el.id === "calmCode" || el.getAttribute("name") === "calmCode") return;
+      const type = String(el.getAttribute("type") || "text").toLowerCase();
+      if (["hidden", "password", "checkbox", "radio", "submit", "button", "file", "image"].includes(type)) return;
+      const rect = el.getBoundingClientRect?.();
+      const box = (rect?.width || 0) * (rect?.height || 0);
+      if (box > area && rect.width >= 40 && rect.height >= 12) {
+        area = box;
+        best = el;
+      }
+    });
+    return best;
+  }
+
+  function menuFormFor(field) {
+    if (field?.form) return field.form;
+    const calm = calmCodeField();
+    if (calm?.form) return calm.form;
+    return document.forms?.[0] || null;
+  }
+
+  function menuSnapshot(field, extra) {
+    const rect = field?.getBoundingClientRect?.();
+    const type = field ? String(field.getAttribute?.("type") || "") : "";
+    let style = null;
+    try { style = field ? getComputedStyle(field) : null; } catch { style = null; }
+    const hidden = !field
+      || type === "hidden"
+      || style?.display === "none"
+      || style?.visibility === "hidden"
+      || Number(style?.opacity) === 0
+      || ((rect?.width || 0) < 2 && (rect?.height || 0) < 2);
+    const form = menuFormFor(field);
+    const inputs = Array.from(document.querySelectorAll("input, textarea")).slice(0, 8).map((el) => {
+      const box = el.getBoundingClientRect?.();
+      return {
+        id: el.id || "",
+        name: el.getAttribute("name") || "",
+        type: el.getAttribute("type") || "",
+        value: cellText(el.value).slice(0, 24),
+        w: Math.round(box?.width || 0),
+        h: Math.round(box?.height || 0),
+      };
+    });
+    const frames = Array.from(document.querySelectorAll("iframe, frame")).slice(0, 4).map((frame) => ({
+      id: frame.id || "",
+      src: cellText(frame.getAttribute("src") || frame.src).slice(0, 180),
+    }));
+    const active = document.activeElement;
+    const screen = cellText(document.body?.innerText).slice(0, 500);
+    const visible = visibleMenuField();
+    return {
+      t: nowIso(),
+      href: location.href,
+      title: document.title || "",
+      ready: document.readyState,
+      active: active ? `${active.tagName}#${active.id || ""}` : "",
+      field: field ? {
+        id: field.id || "",
+        name: field.getAttribute?.("name") || "",
+        type,
+        value: cellText(field.value ?? field.textContent).slice(0, 24),
+        hidden: Boolean(hidden),
+        w: Math.round(rect?.width || 0),
+        h: Math.round(rect?.height || 0),
+        html: cellText(field.outerHTML).slice(0, 240),
+      } : null,
+      visible: visible ? {
+        id: visible.id || "",
+        name: visible.getAttribute("name") || "",
+        value: cellText(visible.value).slice(0, 24),
+      } : null,
+      form: form ? {
+        action: cellText(form.getAttribute("action") || form.action).slice(0, 180),
+        method: String(form.method || "").toLowerCase(),
+        names: Array.from(form.elements || []).slice(0, 8).map((el) => el.name || el.id || el.tagName),
+      } : null,
+      inputs,
+      frames,
+      screen,
+      screenHas147: screen.includes("147"),
+      ...extra,
+    };
+  }
+
+  function saveMenuShot(shot) {
+    GM_setValue("plf.menuShot", shot);
+  }
+
+  async function typeMenuCode() {
+    const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+    if (!started || Date.now() - started > 20000 || typeMenuCode.drive === started) return;
+    typeMenuCode.drive = started;
+    const deadline = started + 4000;
+    let launcher = null;
+    while (!launcher && Date.now() < deadline) {
+      GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+      launcher = launcherField() || visibleMenuField();
+      if (!launcher) await sleep(150);
+    }
+    const field = launcher || calmCodeField() || document.body;
+    const before = menuSnapshot(field, { step: "seen", keys: "" });
+    saveMenuShot(before);
+    rememberDropzone({
+      step: "menu-field",
+      dropzone: location.href,
+      detail: `${field?.id || field?.getAttribute?.("name") || "none"} value=${before.field?.value || "empty"}`,
+    });
+    if (!field) return;
+    try { field.focus(); } catch { /* The QuickLauncher kept focus. */ }
+    let built = "";
+    for (const ch of ["1", "4", "7"]) {
+      built += ch;
+      if ("value" in field) moveSetField(field, built);
+      fireMoveKey(field, ch);
+      GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+      await sleep(70);
+    }
+    if ("value" in field && cellText(field.value) !== "147") moveSetField(field, "147");
+    fireMoveKey(field, "Enter");
+    const form = field.form || menuFormFor(field);
+    const submit = form ? "form.submit" : "enter";
+    const after = menuSnapshot(field, { step: "submit", keys: "147 Enter", submit, typedInto: field.id || field.getAttribute?.("name") || field.tagName });
+    saveMenuShot(after);
+    rememberDropzone({
+      step: "menu-147",
+      dropzone: location.href,
+      detail: `${after.typedInto} value=${after.field?.value || "empty"} screen147=${after.screenHas147} ${submit}`,
+      error: cellText(field.value) === "147" || after.screenHas147 ? "" : "147 was not in the QuickLauncher",
+    });
+    if (!form || form === calmCodeField()?.form) return;
+    try { form.submit(); } catch { /* Enter already submitted the QuickLauncher. */ }
+  }
+
+  if ((isMoveApp || isAftMenu || isFcMenu) && isTop) {
+    window.addEventListener("pagehide", () => {
+      GM_setValue("plf.moveTabHidden", Date.now());
+    });
+  }
+
+  if (isAftMenu || isFcMenu) {
+    typeMenuCode();
+    setInterval(() => typeMenuCode(), 700);
   }
 
   if (isFcMenu && isTop) {
@@ -5744,17 +6175,7 @@
     };
     note();
     rememberDropzone({ step: "fcmenu", dropzone: location.href });
-    const pack = GM_getValue(KEYS.dropzoneQueue, null);
-    const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
-    const pending = (Array.isArray(pack?.jobs) ? pack.jobs : []).some((job) => job && Number(job.n) > cursor);
-    const left = Number(GM_getValue("plf.dropzoneMenuLeave", 0)) || 0;
-    if (pending && Number(GM_getValue("plf.moveCheckHold", 0)) <= 0 && Date.now() - left > 20000) {
-      GM_setValue("plf.dropzoneMenuLeave", Date.now());
-      showFcMenu("FC Menu opened. Going back to the scan page.");
-      location.replace(MOVE_URL);
-    } else {
-      showFcMenu("This is FC Menu, not the scan page.");
-      setInterval(note, 4000);
-    }
+    showFcMenu("This is FC Menu.");
+    setInterval(note, 4000);
   }
 })();
