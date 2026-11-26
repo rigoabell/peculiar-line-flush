@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.13
+// @version      2.10.15
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -41,7 +41,7 @@
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
   A night that runs past midnight keeps that same file until 6:00 AM. At 6:00 AM the next file starts.
-  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL. Check opens the MEM3 menu, types 147, and the site opens the Move App. Move containers individually then opens job 200.
+  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL. Check opens the MEM3 menu, types 147, and the site opens the Move App. If the menu asks to continue the current path session, the script opens Yes. Move containers individually then opens job 200.
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
   EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
@@ -56,7 +56,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.13";
+  const VERSION = "2.10.15";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -6097,9 +6097,67 @@
     GM_setValue("plf.menuShot", shot);
   }
 
+  function continueSessionPrompt(text) {
+    const line = cellText(text).replace(/\s+/g, " ");
+    return /do you want to continue your .+ session while using this app\?/i.test(line);
+  }
+
+  function continueSessionYes(links) {
+    const rows = Array.isArray(links) ? links : [];
+    return rows.find((link) => /^yes$/i.test(cellText(link?.text)) && /\/continue\//i.test(cellText(link?.href))) || null;
+  }
+
+  function continueSessionTarget(href, base) {
+    const raw = cellText(href);
+    if (!/\/continue\//i.test(raw)) return "";
+    try {
+      return new URL(raw, base || "https://menu.na.aft.amazonoperations.app/").href;
+    } catch {
+      return "";
+    }
+  }
+
+  function onContinueSessionPage() {
+    if (/confirmSessionKill/i.test(location.pathname)) return true;
+    const message = document.querySelector("#endSessionMessage");
+    return continueSessionPrompt(message?.textContent || "");
+  }
+
+  function clickContinueSession() {
+    if (clickContinueSession.done || !onContinueSessionPage()) return false;
+    const message = document.querySelector("#endSessionMessage > p") || document.querySelector("#endSessionMessage p") || document.querySelector("#endSessionMessage");
+    const links = Array.from(document.querySelectorAll("a")).map((el) => ({
+      text: el.textContent,
+      href: el.getAttribute("href") || el.href || "",
+      el,
+    }));
+    const yes = continueSessionYes(links);
+    const next = continueSessionTarget(yes?.el?.href || yes?.href, location.href);
+    if (!yes?.el || !next || next === location.href) return false;
+    rememberDropzone({
+      step: "continue-session",
+      dropzone: next,
+      detail: cellText(message?.textContent).slice(0, 180),
+    });
+    GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+    try { yes.el.click(); } catch { /* The Yes link did not take the click. */ }
+    try {
+      location.assign(next);
+      clickContinueSession.done = true;
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
   async function typeMenuCode() {
+    if (onContinueSessionPage()) {
+      clickContinueSession();
+      return;
+    }
     const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
     if (!started || Date.now() - started > 20000 || typeMenuCode.drive === started) return;
+    if (Number(GM_getValue("plf.menu147Done", 0)) === started) return;
     typeMenuCode.drive = started;
     const deadline = started + 4000;
     let launcher = null;
@@ -6128,6 +6186,7 @@
     }
     if ("value" in field && cellText(field.value) !== "147") moveSetField(field, "147");
     fireMoveKey(field, "Enter");
+    GM_setValue("plf.menu147Done", started);
     const form = field.form || menuFormFor(field);
     const submit = form ? "form.submit" : "enter";
     const after = menuSnapshot(field, { step: "submit", keys: "147 Enter", submit, typedInto: field.id || field.getAttribute?.("name") || field.tagName });
@@ -6151,6 +6210,22 @@
   if (isAftMenu || isFcMenu) {
     typeMenuCode();
     setInterval(() => typeMenuCode(), 700);
+  }
+
+  if (isAftMenu && isTop) {
+    const watchStarted = Date.now();
+    const watchContinue = () => clickContinueSession();
+    watchContinue();
+    const watchTimer = setInterval(() => {
+      if (clickContinueSession()) {
+        clearInterval(watchTimer);
+        return;
+      }
+      if (!onContinueSessionPage() && document.readyState === "complete" && Date.now() - watchStarted > 1500) {
+        clearInterval(watchTimer);
+      }
+    }, 300);
+    setTimeout(() => clearInterval(watchTimer), 20000);
   }
 
   if (isFcMenu && isTop) {
