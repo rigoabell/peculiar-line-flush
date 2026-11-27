@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.15
+// @version      2.10.17
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -41,7 +41,7 @@
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
   A night that runs past midnight keeps that same file until 6:00 AM. At 6:00 AM the next file starts.
-  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL. Check opens the MEM3 menu, types 147, and the site opens the Move App. If the menu asks to continue the current path session, the script opens Yes. Move containers individually then opens job 200.
+  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL. A check first opens IT Service Login, then the MEM3 menu, types 147, and the site opens the Move App. If the menu asks to continue the current path session, the script opens Yes. Move containers individually then opens job 200.
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
   EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
@@ -56,7 +56,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.15";
+  const VERSION = "2.10.17";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -64,6 +64,7 @@
   const PECULIAR_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
   const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=200";
   const MENU_URL = "https://menu.na.aft.amazonoperations.app/MEM3";
+  const LOGIN_URL = "https://d34wrqb3xn2znf.cloudfront.net/idp-selection?redirect_uri=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fdo%2Fmfa%2Flogin&nonce=5f50a80c5db87e9cc23b0bc2124a6b6de1e21c0b83cd318714aff390c61ec6fb&scope=openid+tenantId%3A1545ed74-d2cd-11ec-9d64-0242ac120002&client_id=fc-menu-prod-na&state&response_type=code&otp&user_code&authorize_url=https%3A%2F%2Fprod.us-east-1.federated-auth.aft.a2z.com%2F1545ed74-d2cd-11ec-9d64-0242ac120002%2Fauthorize&data=%5B%7B%22id%22%3A%22amazon-federate-prod%22%2C%22displayString%22%3A%22IT+Service+Login%22%7D%2C%7B%22id%22%3A%22maask-prod-na%22%2C%22displayString%22%3A%22Login+with+MAASK%22%7D%5D&code_challenge&code_challenge_method&referrer=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fmidway%2Flogin&ui_locales=en_US";
   const SP_SITE = "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com";
   const SOS_FOLDER =
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/Line Flush Records";
@@ -2749,7 +2750,7 @@
   function ensureMoveTab() {
     const now = Date.now();
     const checking = !moveCheckDone(GM_getValue(KEYS.moveChecks, null), now);
-    const href = checking ? MENU_URL : MOVE_URL;
+    const href = checking ? LOGIN_URL : MOVE_URL;
     const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
     const hidden = Number(GM_getValue("plf.moveTabHidden", 0)) || 0;
     if (moveTabStillOpen(heartbeat, hidden, Date.now(), HEARTBEAT_STALE_MS)) return;
@@ -2758,6 +2759,9 @@
     if (checking) {
       GM_setValue("plf.menuDrive", now);
       GM_setValue("plf.menu147Done", 0);
+      GM_setValue("plf.menuReached", 0);
+      GM_setValue("plf.menuHostAt", 0);
+      GM_setValue("plf.itServiceAt", 0);
       GM_setValue("plf.checkSlot", halfHourSlot(now));
     } else {
       GM_setValue("plf.menuDrive", 0);
@@ -4105,7 +4109,7 @@
             </div>
             <div class="counts" id="counts"></div>
                 <div class="clock" id="clock">00:00:00</div>
-            <a id="moveCheck" class="move-check" href="${MENU_URL}" target="_blank" rel="noopener" title="Open the MEM3 menu. There cannot be another tab open with the move tool.">Check</a>
+            <a id="moveCheck" class="move-check" href="${LOGIN_URL}" target="_blank" rel="noopener" title="Open IT Service Login, then the MEM3 menu. There cannot be another tab open with the move tool.">Check</a>
             <button id="share" type="button" title="Share the Tampermonkey install link">Share</button>
             <button id="debug" title="Copy debug JSON">Debug</button>
             <select id="panelSize" title="Panel size. Screen matches your display. +25% and +50% make this panel bigger.">
@@ -4261,7 +4265,7 @@
           <div id="dzPromptText"></div>
           <div id="dzCheck">
             <div id="dzCheckText"></div>
-            <a id="dzCheckBtn" href="${MENU_URL}" target="_blank" rel="noopener">Check</a>
+            <a id="dzCheckBtn" href="${LOGIN_URL}" target="_blank" rel="noopener">Check</a>
           </div>
           <div class="dzpop-actions" id="dzPopActions">
             <button id="dzYes" type="button">Yes</button>
@@ -5395,12 +5399,15 @@
       GM_setValue(KEYS.moveCheckAt, now);
       GM_setValue("plf.menuDrive", now);
       GM_setValue("plf.menu147Done", 0);
+      GM_setValue("plf.menuReached", 0);
+      GM_setValue("plf.menuHostAt", 0);
+      GM_setValue("plf.itServiceAt", 0);
       GM_setValue("plf.moveCheckHold", now);
-      rememberDropzone({ step: "check-click", dropzone: MENU_URL });
+      rememberDropzone({ step: "check-click", dropzone: LOGIN_URL });
       try {
-        GM_openInTab(MENU_URL, { active: true, insert: true, setParent: true });
+        GM_openInTab(LOGIN_URL, { active: true, insert: true, setParent: true });
       } catch {
-        /* The menu tab could not be opened. */
+        /* The login tab could not be opened. */
       }
       paintDropzoneStatus("Move App is open. Close that tab. There cannot be another tab open with the move tool.");
       if (!dropHold || dropPhase === "dropping" || dropPhase === "failed") return;
@@ -5883,22 +5890,71 @@
     }
   }
 
+  function itServiceLoginLabel(text) {
+    return cellText(text).replace(/\s+/g, " ").trim() === "IT Service Login";
+  }
+
+  function isMenuLauncherHref(href) {
+    try {
+      const parsed = new URL(String(href || ""));
+      return /menu\.na\.aft\.amazonoperations\.app/i.test(parsed.hostname)
+        && /^\/MEM3\/?$/i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  function followLoginToMenu() {
+    if (followLoginToMenu.armed) return;
+    const drive = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+    if (!drive || Date.now() - drive > 90000) return;
+    followLoginToMenu.armed = true;
+    const clickedAt = Date.now();
+    const timer = setInterval(() => {
+      const reached = Number(GM_getValue("plf.menuReached", 0)) || 0;
+      const currentDrive = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+      if (/menu\.na\.aft\.amazonoperations\.app/i.test(location.hostname)) {
+        clearInterval(timer);
+        return;
+      }
+      if (currentDrive && reached >= currentDrive) {
+        clearInterval(timer);
+        return;
+      }
+      if (Date.now() - clickedAt < 12000) return;
+      clearInterval(timer);
+      if (followLoginToMenu.opened) return;
+      followLoginToMenu.opened = true;
+      rememberDropzone({ step: "menu-open", dropzone: MENU_URL, detail: "Login did not open the menu" });
+      try {
+        location.assign(MENU_URL);
+      } catch {
+        try { GM_openInTab(MENU_URL, { active: true, insert: true, setParent: true }); } catch { /* The menu tab could not be opened. */ }
+      }
+    }, 400);
+  }
+
   function chooseItServiceLogin() {
     let clicked = false;
     const visit = (el) => {
       if (clicked || !el) return;
       const label = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-      if (label !== "IT Service Login") return;
+      if (!itServiceLoginLabel(label)) return;
       const button = el.closest("alchemy-button, button, a, [role='button']") || el;
       const buttonLabel = (button.innerText || button.textContent || "").replace(/\s+/g, " ").trim();
-      if (buttonLabel !== "IT Service Login" || /MAASK/i.test(buttonLabel)) return;
+      if (!itServiceLoginLabel(buttonLabel) || /MAASK/i.test(buttonLabel)) return;
       if (button.dataset.plfItLogin === "1") {
         clicked = true;
         return;
       }
       button.dataset.plfItLogin = "1";
       const inner = button.shadowRoot && button.shadowRoot.querySelector("button, a, [role='button']");
-      (inner || button).click();
+      movePress(el);
+      movePress(button);
+      if (inner) movePress(inner);
+      GM_setValue("plf.itServiceAt", Date.now());
+      rememberDropzone({ step: "it-service", dropzone: location.href, detail: "IT Service Login" });
+      followLoginToMenu();
       clicked = true;
     };
     const walk = (root) => {
@@ -5932,6 +5988,7 @@
       return;
     }
     tryClick();
+    if (Number(GM_getValue("plf.itServiceAt", 0)) > 0) followLoginToMenu();
     const arm = () => {
       if (!document.documentElement) return;
       tryClick();
@@ -6156,17 +6213,21 @@
       return;
     }
     const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
-    if (!started || Date.now() - started > 20000 || typeMenuCode.drive === started) return;
+    if (!started || Date.now() - started > 90000 || typeMenuCode.drive === started || typeMenuCode.running) return;
     if (Number(GM_getValue("plf.menu147Done", 0)) === started) return;
-    typeMenuCode.drive = started;
-    const deadline = started + 4000;
+    typeMenuCode.running = true;
+    let field = null;
+    try {
+    const deadline = Date.now() + 8000;
     let launcher = null;
-    while (!launcher && Date.now() < deadline) {
+    while (!launcher && Date.now() < deadline && Date.now() - started < 90000) {
       GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
       launcher = launcherField() || visibleMenuField();
       if (!launcher) await sleep(150);
     }
-    const field = launcher || calmCodeField() || document.body;
+    if (!launcher) return;
+    typeMenuCode.drive = started;
+    field = launcher;
     const before = menuSnapshot(field, { step: "seen", keys: "" });
     saveMenuShot(before);
     rememberDropzone({
@@ -6199,6 +6260,9 @@
     });
     if (!form || form === calmCodeField()?.form) return;
     try { form.submit(); } catch { /* Enter already submitted the QuickLauncher. */ }
+    } finally {
+      typeMenuCode.running = false;
+    }
   }
 
   if ((isMoveApp || isAftMenu || isFcMenu) && isTop) {
@@ -6207,9 +6271,35 @@
     });
   }
 
+  function noteMenuLauncher() {
+    const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+    if (!started || Date.now() - started > 90000) return;
+    if (Number(GM_getValue("plf.menu147Done", 0)) === started) return;
+    if (onContinueSessionPage()) return;
+    const launcher = Boolean(document.getElementById("qlInput")) || isMenuLauncherHref(location.href);
+    if (launcher) {
+      GM_setValue("plf.menuReached", Date.now());
+      return;
+    }
+    if (!/menu\.na\.aft\.amazonoperations\.app/i.test(location.hostname)) return;
+    const landed = Number(GM_getValue("plf.menuHostAt", 0)) || 0;
+    if (!landed) {
+      GM_setValue("plf.menuHostAt", Date.now());
+      return;
+    }
+    if (Date.now() - landed < 4000 || noteMenuLauncher.opened) return;
+    noteMenuLauncher.opened = true;
+    rememberDropzone({ step: "menu-open", dropzone: MENU_URL, detail: "Login did not open MEM3" });
+    try { location.assign(MENU_URL); } catch { /* The menu page stayed where it was. */ }
+  }
+
   if (isAftMenu || isFcMenu) {
+    if (isAftMenu && isTop) noteMenuLauncher();
     typeMenuCode();
-    setInterval(() => typeMenuCode(), 700);
+    setInterval(() => {
+      if (isAftMenu && isTop) noteMenuLauncher();
+      typeMenuCode();
+    }, 700);
   }
 
   if (isAftMenu && isTop) {
