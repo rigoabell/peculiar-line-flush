@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.17
+// @version      2.10.19
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -41,7 +41,7 @@
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
   A night that runs past midnight keeps that same file until 6:00 AM. At 6:00 AM the next file starts.
-  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL. A check first opens IT Service Login, then the MEM3 menu, types 147, and the site opens the Move App. If the menu asks to continue the current path session, the script opens Yes. Move containers individually then opens job 200.
+  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL. A check first opens IT Service Login and selects it. If that page does not open the menu, the script opens the MEM3 menu about a second later, types 147, and the site opens the Move App. If the menu asks to continue the current path session, the script opens Yes. Move containers individually then opens job 200.
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
   EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
@@ -56,7 +56,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.17";
+  const VERSION = "2.10.19";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -5340,8 +5340,16 @@
           if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "") return;
           showMoveCheck();
         }, 3000);
-        dropFailTimer = setTimeout(() => {
+        beginDropScan();
+        const failThisDrop = () => {
           if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "" || !dzPrompt.classList.contains("open")) return;
+          const drive = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+          const checking = Boolean(drive) && Date.now() - drive < 90000;
+          if (checking && Date.now() - drive < 45000) {
+            clearTimeout(dropFailTimer);
+            dropFailTimer = setTimeout(failThisDrop, dropFailWait(true, Date.now() - drive));
+            return;
+          }
           const container = cellText(dropHold?.container);
           const dropzone = cellText(dropHold?.dropzone);
           const reason = "The drop did not finish";
@@ -5352,8 +5360,11 @@
           rememberDropzone({ container, dropzone, step: "not sent", error: reason });
           forgetQueuedContainer(container);
           hideMoveCheck();
-        }, 6000);
-        beginDropScan();
+        };
+        clearTimeout(dropFailTimer);
+        const driveNow = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+        const checkingNow = Boolean(driveNow) && Date.now() - driveNow < 90000;
+        dropFailTimer = setTimeout(failThisDrop, dropFailWait(checkingNow, checkingNow ? Date.now() - driveNow : 0));
       }
       dropWaitingClose = true;
       dzPromptText.textContent = offer
@@ -5894,6 +5905,21 @@
     return cellText(text).replace(/\s+/g, " ").trim() === "IT Service Login";
   }
 
+  function itServiceStillOnChooser(href) {
+    return /idp-selection/i.test(String(href || ""));
+  }
+
+  function itServiceMenuWait() {
+    return 1000;
+  }
+
+  function dropFailWait(checking, elapsedMs) {
+    if (!checking) return 6000;
+    const left = 45000 - Number(elapsedMs || 0);
+    if (left <= 0) return 6000;
+    return Math.max(2000, left);
+  }
+
   function isMenuLauncherHref(href) {
     try {
       const parsed = new URL(String(href || ""));
@@ -5904,12 +5930,16 @@
     }
   }
 
-  function followLoginToMenu() {
-    if (followLoginToMenu.armed) return;
+  function followLoginToMenu(waitMs) {
     const drive = Number(GM_getValue("plf.menuDrive", 0)) || 0;
     if (!drive || Date.now() - drive > 90000) return;
+    const due = Date.now() + Math.max(800, Number(waitMs) || 4000);
+    if (followLoginToMenu.armed) {
+      if (due < followLoginToMenu.due) followLoginToMenu.due = due;
+      return;
+    }
     followLoginToMenu.armed = true;
-    const clickedAt = Date.now();
+    followLoginToMenu.due = due;
     const timer = setInterval(() => {
       const reached = Number(GM_getValue("plf.menuReached", 0)) || 0;
       const currentDrive = Number(GM_getValue("plf.menuDrive", 0)) || 0;
@@ -5921,7 +5951,7 @@
         clearInterval(timer);
         return;
       }
-      if (Date.now() - clickedAt < 12000) return;
+      if (Date.now() < followLoginToMenu.due) return;
       clearInterval(timer);
       if (followLoginToMenu.opened) return;
       followLoginToMenu.opened = true;
@@ -5931,73 +5961,107 @@
       } catch {
         try { GM_openInTab(MENU_URL, { active: true, insert: true, setParent: true }); } catch { /* The menu tab could not be opened. */ }
       }
-    }, 400);
+    }, 200);
   }
 
-  function chooseItServiceLogin() {
-    let clicked = false;
-    const visit = (el) => {
-      if (clicked || !el) return;
+  function loginPress(el) {
+    if (!el) return;
+    const view = el.ownerDocument?.defaultView || pageWindow;
+    const opts = { bubbles: true, cancelable: true, composed: true, view };
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+      try {
+        const Ctor = type.startsWith("pointer") && view.PointerEvent ? view.PointerEvent : view.MouseEvent;
+        el.dispatchEvent(new Ctor(type, opts));
+      } catch {
+        /* This page does not accept that pointer event. */
+      }
+    });
+    try { el.focus(); } catch { /* The login button kept focus. */ }
+    try { el.click(); } catch { /* The login button kept its click. */ }
+  }
+
+  function itServiceControl() {
+    let found = null;
+    const consider = (el) => {
+      if (found || !el) return;
       const label = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
       if (!itServiceLoginLabel(label)) return;
       const button = el.closest("alchemy-button, button, a, [role='button']") || el;
       const buttonLabel = (button.innerText || button.textContent || "").replace(/\s+/g, " ").trim();
       if (!itServiceLoginLabel(buttonLabel) || /MAASK/i.test(buttonLabel)) return;
-      if (button.dataset.plfItLogin === "1") {
-        clicked = true;
-        return;
-      }
-      button.dataset.plfItLogin = "1";
       const inner = button.shadowRoot && button.shadowRoot.querySelector("button, a, [role='button']");
-      movePress(el);
-      movePress(button);
-      if (inner) movePress(inner);
-      GM_setValue("plf.itServiceAt", Date.now());
-      rememberDropzone({ step: "it-service", dropzone: location.href, detail: "IT Service Login" });
-      followLoginToMenu();
-      clicked = true;
+      found = { host: button, inner: inner || null, label: el };
     };
     const walk = (root) => {
-      if (!root || !root.querySelectorAll) return;
-      root.querySelectorAll("alchemy-button, button, a, [role='button'], span.button__label").forEach((el) => {
-        visit(el);
-        if (el.shadowRoot) walk(el.shadowRoot);
+      if (!root || !root.querySelectorAll || found) return;
+      root.querySelectorAll("alchemy-button, button, a, [role='button'], span.button__label").forEach((node) => {
+        consider(node);
+        if (node.shadowRoot) walk(node.shadowRoot);
       });
     };
     walk(document);
-    return clicked;
+    return found;
+  }
+
+  function pressItServiceLogin() {
+    if (!itServiceStillOnChooser(location.href)) return false;
+    const control = itServiceControl();
+    if (!control) return false;
+    const now = Date.now();
+    const ready = Boolean(control.inner);
+    if (ready && pressItServiceLogin.innerAt && now - pressItServiceLogin.innerAt < 800) return true;
+    loginPress(ready ? control.inner : control.label);
+    loginPress(control.host);
+    if (!pressItServiceLogin.logged) {
+      pressItServiceLogin.logged = true;
+      GM_setValue("plf.itServiceAt", now);
+      rememberDropzone({ step: "it-service", dropzone: location.href, detail: "IT Service Login" });
+    }
+    if (ready) pressItServiceLogin.innerAt = now;
+    followLoginToMenu(itServiceMenuWait());
+    return ready;
   }
 
   function watchItServiceLogin() {
     if (!isLoginChooser) return;
+    const onChooser = itServiceStillOnChooser(location.href);
+    if (!onChooser) {
+      if (Number(GM_getValue("plf.itServiceAt", 0)) > 0) followLoginToMenu(itServiceMenuWait());
+      return;
+    }
+    const seen = new Set();
     const tryClick = () => {
       try {
-        chooseItServiceLogin();
+        pressItServiceLogin();
       } catch {
         /* The login page changed shape. */
       }
+      const watch = (root) => {
+        if (!root || seen.has(root) || !root.querySelectorAll) return;
+        seen.add(root);
+        try {
+          const obs = new MutationObserver(tryClick);
+          obs.observe(root, { childList: true, subtree: true });
+          setTimeout(() => obs.disconnect(), 20000);
+        } catch {
+          /* This root cannot be watched. */
+        }
+        root.querySelectorAll("*").forEach((node) => {
+          if (node.shadowRoot) watch(node.shadowRoot);
+        });
+      };
+      if (document.documentElement) watch(document.documentElement);
     };
-    const onChooser = /idp-selection|federated-auth\.aft\.a2z\.com/i.test(location.href);
-    if (!onChooser) {
-      let tries = 0;
-      const timer = setInterval(() => {
-        tries += 1;
-        tryClick();
-        if (tries >= 20) clearInterval(timer);
-      }, 500);
-      return;
-    }
     tryClick();
-    if (Number(GM_getValue("plf.itServiceAt", 0)) > 0) followLoginToMenu();
-    const arm = () => {
-      if (!document.documentElement) return;
+    const timer = setInterval(() => {
+      if (!itServiceStillOnChooser(location.href)) {
+        clearInterval(timer);
+        return;
+      }
       tryClick();
-      const obs = new MutationObserver(tryClick);
-      obs.observe(document.documentElement, { childList: true, subtree: true });
-      setTimeout(() => obs.disconnect(), 60000);
-    };
-    if (document.documentElement) arm();
-    else document.addEventListener("DOMContentLoaded", arm, { once: true });
+    }, 200);
+    setTimeout(() => clearInterval(timer), 20000);
+    if (!document.documentElement) document.addEventListener("DOMContentLoaded", tryClick, { once: true });
   }
   watchItServiceLogin();
 
@@ -6041,7 +6105,7 @@
       const menu = onMoveMenu() || Boolean(document.getElementById("menu-entry-text-2") || document.getElementById("menu-entry-move-2"));
       if ((!driving && !holding && !pending) || !menu) return;
       if (clickIndividualMove()) return;
-      if (driving && !bootMove.typed && document.body && Date.now() - started > 2000) {
+      if (driving && !bootMove.typed && document.body && Date.now() - started > 400) {
         bootMove.typed = true;
         const target = document.body;
         try { target.focus(); } catch { /* The menu kept focus. */ }
@@ -6287,7 +6351,7 @@
       GM_setValue("plf.menuHostAt", Date.now());
       return;
     }
-    if (Date.now() - landed < 4000 || noteMenuLauncher.opened) return;
+    if (Date.now() - landed < 800 || noteMenuLauncher.opened) return;
     noteMenuLauncher.opened = true;
     rememberDropzone({ step: "menu-open", dropzone: MENU_URL, detail: "Login did not open MEM3" });
     try { location.assign(MENU_URL); } catch { /* The menu page stayed where it was. */ }
